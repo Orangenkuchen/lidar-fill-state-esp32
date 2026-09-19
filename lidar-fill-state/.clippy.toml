@@ -1,0 +1,2 @@
+# Warn me about functions whose stack usage is larger than 1024 bytes
+stack-size-threshold = 1024
