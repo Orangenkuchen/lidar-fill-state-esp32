@@ -1,7 +1,42 @@
 fn main() {
+    load_wifi_credentials();
+
     linker_be_nice();
-    // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
+
+    // make sure linkall.x is the last linker script
+    // (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+fn load_wifi_credentials() {
+    println!("cargo:rerun-if-changed=wifi.env");
+
+    let contents = std::fs::read_to_string("wifi.env")
+        .expect("Failed to read wifi.env");
+
+    for line in contents.lines() {
+        let line = line.trim();
+
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            panic!("Invalid line in wifi.env: {line}");
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+
+        match key {
+            "WIFI_SSID" | "WIFI_PASSWORD" => {
+                println!("cargo:rustc-env={key}={value}");
+            }
+            _ => {
+                panic!("Unknown key in wifi.env: {key}");
+            }
+        }
+    }
 }
 
 fn linker_be_nice() {
