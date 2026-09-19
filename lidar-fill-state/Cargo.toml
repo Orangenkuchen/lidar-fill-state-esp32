@@ -57,6 +57,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
+heapless = "0.9.3"
 
 [profile.dev]
 opt-level = "s"

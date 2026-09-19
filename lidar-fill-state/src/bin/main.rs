@@ -11,11 +11,12 @@ use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::CpuClock,
     gpio::Level,
-    rmt::{PulseCode, Rmt, TxChannelConfig, TxChannelCreator}, // The RGB-LED speeks the RMT-Protocoll
+    rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator},
     time::Rate,
     timer::timg::TimerGroup,
 };
 
+use heapless::Vec;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -28,7 +29,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 // This macro sets up the ESP RTOS/Embassy runtime.
 #[esp_rtos::main]
-async fn main(_spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) -> ! {
     // Use the default configuration, but run the CPU at its maximum clock speed.
     let config = esp_hal::Config::default()
         .with_cpu_clock(CpuClock::max());
@@ -70,56 +71,165 @@ async fn main(_spawner: Spawner) -> ! {
         .unwrap()
         .with_pin(peripherals.GPIO8);
 
+
+    // --------------------------------------------------------
+    // Start LED task
+    // --------------------------------------------------------
+
+    spawner.spawn(
+        led_task(channel)
+            .expect("failed to create LED task")
+    );
+
+
+
+    // --------------------------------------------------------
+    // Main task
+    // --------------------------------------------------------
+    //
+    // Later we can spawn things like:
+    //
+    // spawner.spawn(wifi_task(...)).unwrap();
+    // spawner.spawn(web_server_task(...)).unwrap();
+    // spawner.spawn(lidar_task(...)).unwrap();
+    //
+    // The main task itself doesn't need to do anything right
+    // now, so it simply stays alive.
+    //
+
     loop {
-        // RED
-        let data = ws2812_data(5, 0, 5);
-
-        channel.transmit(&data).await.unwrap();
-
-        Timer::after(Duration::from_millis(500)).await;
-
-        // YELLOW
-        let data = ws2812_data(5, 5, 0);
-
-        channel.transmit(&data).await.unwrap();
-
-        Timer::after(Duration::from_millis(500)).await;
+        Timer::after(Duration::from_secs(1)).await;
     }
 }
 
-/// Generate the RMT waveform for one WS2812 RGB LED.
+
+/// ============================================================
+/// LED TASK
+/// ============================================================
 ///
-/// WS2812 expects colors in GRB order.
-fn ws2812_data(r: u8, g: u8, b: u8) -> [PulseCode; 25] {
-    // RGB = 3 bytes so 24 bit
-    // 24 data bits + 1 reset = 25 PulseCodes
+/// This runs independently from main().
+///
+/// Because the RMT channel is asynchronous, while the RMT
+/// hardware is transmitting, Embassy can run other tasks.
+#[embassy_executor::task]
+async fn led_task(
+    mut channel: Channel<'static, esp_hal::Async, Tx>,
+) {
+    loop {
+        show_led_sequence(
+            &mut channel, 
+            [
+                LedFlash { r: 0x05, g: 0x0, b: 0x05, duration: Duration::from_millis(500) },
+                LedFlash { r: 0x05, g: 0x05, b: 0x0, duration: Duration::from_millis(500) }
+            ].into()
+        ).await;
+    }
+}
+
+/// ============================================================
+/// WS2812 / ADDRESSABLE RGB LED
+/// ============================================================
+///
+/// The LED expects:
+///
+///     G R B
+///
+/// rather than:
+///
+///     R G B
+///
+/// Each color consists of 8 bits:
+///
+///     8 + 8 + 8 = 24 bits
+///
+/// We therefore need:
+///
+///     24 PulseCodes for the color
+///     1  PulseCode for the reset/latch
+///
+/// Total:
+///
+///     25 PulseCodes
+fn ws2812_data(
+    r: u8,
+    g: u8,
+    b: u8,
+) -> [PulseCode; 25] {
+
+    // WS2812 uses GRB ordering.
+    let bytes = [
+        g,
+        r,
+        b,
+    ];
 
 
-    let bytes = [g, r, b];
+    // Allocate space for:
+    //
+    // 24 color bits
+    // + 1 reset pulse
+    //
+    let mut data = [
+        PulseCode::default();
+        25
+    ];
 
-    let mut data = [PulseCode::default(); 25];
 
     let mut bit = 0;
 
+
+    // --------------------------------------------------------
+    // Encode the 24 color bits
+    // --------------------------------------------------------
+
     while bit < 24 {
-        // Select the current byte (becuase divide discards floatvalues on purpose here)
+
+        // Determine which color byte we're currently in.
+        //
+        // 0..7   = G
+        // 8..15  = R
+        // 16..23 = B
+        //
         let byte = bytes[bit / 8];
-        // The Mask starts at the most left hand 
-        // bit and moves right with each iterration
+
+
+        // Select the individual bit.
+        //
+        // 0x80 = 10000000
+        //
+        // The mask moves from the most significant bit
+        // to the least significant bit.
+        //
         let mask = 0x80 >> (bit % 8);
 
+
         if byte & mask != 0 {
-            // Bit 1:
-            // ~0.8 us HIGH + ~0.45 us LOW
+
+            // ------------------------------------------------
+            // Bit = 1
+            //
+            // 80 MHz RMT:
+            //
+            // 64 ticks HIGH = 800 ns
+            // 36 ticks LOW  = 450 ns
+            // ------------------------------------------------
+
             data[bit] = PulseCode::new(
                 Level::High,
                 64,
                 Level::Low,
                 36,
             );
+
         } else {
-            // Bit 0:
-            // ~0.4 us HIGH + ~0.85 us LOW
+
+            // ------------------------------------------------
+            // Bit = 0
+            //
+            // 32 ticks HIGH = 400 ns
+            // 68 ticks LOW  = 850 ns
+            // ------------------------------------------------
+
             data[bit] = PulseCode::new(
                 Level::High,
                 32,
@@ -128,10 +238,23 @@ fn ws2812_data(r: u8, g: u8, b: u8) -> [PulseCode; 25] {
             );
         }
 
+
         bit += 1;
     }
 
-    // Reset/latch: LOW for >50 us.
+
+    // --------------------------------------------------------
+    // Reset / latch
+    // --------------------------------------------------------
+    //
+    // The LED needs the data line LOW for at least ~50 us
+    // before it applies the received color.
+    //
+    // 4000 RMT ticks × 12.5 ns
+    //
+    // = 50 us
+    //
+
     data[24] = PulseCode::new(
         Level::Low,
         4000,
@@ -139,5 +262,30 @@ fn ws2812_data(r: u8, g: u8, b: u8) -> [PulseCode; 25] {
         0,
     );
 
+
     data
+}
+
+/// Sendet an die LED die übergebene Farb-Sequenz
+async fn show_led_sequence(
+    channel: &mut Channel<'static, esp_hal::Async, Tx>,
+    led_flashes: Vec<LedFlash, 10>)
+{
+    for led_flash in led_flashes {
+        let data = ws2812_data(led_flash.r, led_flash.g, led_flash.b);
+
+        channel
+            .transmit(&data)
+            .await
+            .unwrap();
+
+        Timer::after(led_flash.duration).await;
+    }
+}
+
+struct LedFlash {
+    r: u8,
+    g: u8,
+    b: u8,
+    duration: Duration
 }

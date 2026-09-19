@@ -1247,6 +1247,7 @@ dependencies = [
  "esp-hal",
  "esp-radio",
  "esp-rtos",
+ "heapless 0.9.3",
  "smoltcp 0.14.0",
  "static_cell",
 ]
