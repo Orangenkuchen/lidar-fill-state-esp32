@@ -5,6 +5,8 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
+use log::{debug, error, info, warn, trace};
+
 // Embassy is an asynchronous embedded framework 
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -28,6 +30,7 @@ use esp_hal::{
         TxChannelCreator,
     }, rng::Rng, time::Rate, timer::timg::TimerGroup,
 };
+use esp_println as _;
 
 use heapless::Vec;
 
@@ -55,10 +58,7 @@ enum SystemState {
 
 static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
 
-
-/// ============================================================
 /// STATIC NETWORK MEMORY
-/// ============================================================
 ///
 /// embassy-net needs memory that lives for the entire lifetime
 /// of the program.
@@ -81,6 +81,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // This macro sets up the ESP RTOS/Embassy runtime.
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    esp_println::logger::init_logger(log::LevelFilter::Trace);
+
+    info!("Programm starting...");
+
+    trace!("Configuring the ESP and it's peripherls...");
     // Use the default configuration, but run the CPU at its maximum clock speed.
     let config = esp_hal::Config::default()
         .with_cpu_clock(CpuClock::max());
@@ -130,13 +135,14 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap()
         .with_pin(GPIO8);
 
-
+    debug!("Spawning a task for the RGB-LED...");
     // Start the LED-Task
     spawner.spawn(
         led_task(channel)
             .expect("failed to create LED task")
     );
 
+    trace!("Setting up the network and wifi components...");
     let network_components = setup_network(WIFI);
 
     // START NETWORK TASK
@@ -144,50 +150,30 @@ async fn main(spawner: Spawner) -> ! {
     // The runner MUST run continuously.
     //
     // Without this task, TCP/IP won't actually process packets.
+    debug!("Spawning network runner task...");
     spawner.spawn(
         net_task(network_components.runner)
             .expect("failed to spawn network task")
     );
 
-    // Start the wifi task
+    debug!("Spawning a task for wifi managment...");
     spawner.spawn(
         wifi_task(network_components.wifi_controller)
             .expect("failed to spawn Wi-Fi task")
     );
 
-    // WAIT FOR DHCP
-    //
-    // This suspends main until the ESP32 has obtained an
-    // IPv4 configuration from the router.
+    debug!("Waiting for ipv4 config from DHCP...");
     network_components.stack.wait_config_up().await;
 
-    // START WEB SERVER
-    //
-    // At this point:
-    //
-    //     Wi-Fi connected
-    //          +
-    //     DHCP completed
-    //          +
-    //     TCP/IP stack running
-    //
-    // So we can start accepting HTTP connections.
+    if let Some(config) = network_components.stack.config_v4() {
+        trace!("Received IPv4 config from DHCP: IP = {}", config.address);
+    }
+
+    debug!("Spawning a task for the web-server...");
     spawner.spawn(
         web_server_task(network_components.stack)
             .expect("failed to spawn web server task")
     );
-
-    // MAIN TASK
-    //
-    // Everything important is now running in Embassy tasks:
-    //
-    //     LED
-    //     Wi-Fi
-    //     TCP/IP
-    //     HTTP server
-    //
-    // Keep main alive.
-    //
 
     loop {
         Timer::after(
@@ -278,7 +264,7 @@ async fn led_task(
             _ => SystemState::Starting,
         };
         
-        let ledSequence: Vec<LedFlash, 10> = match state {
+        let led_sequence: Vec<LedFlash, 10> = match state {
             SystemState::WifiError => {
                 [
                     LedFlash { r: 0x05, g: 0x0, b: 0x05, duration: Duration::from_millis(500) },
@@ -303,7 +289,7 @@ async fn led_task(
 
         show_led_sequence(
             &mut channel, 
-            ledSequence
+            led_sequence
         ).await;
     }
 }
@@ -316,45 +302,73 @@ async fn wifi_task(
 
     loop {
 
-        // Try to connect.
+        debug!("Trying to connect the the wifi-network ({})...", WIFI_SSID);
         match controller.connect_async().await {
 
-            Ok(_) => {
+            Ok(connect_info) => {
+                let authmodestr = match connect_info.authmode {
+                    esp_radio::wifi::AuthenticationMethod::Dpp => "Dpp",
+                    esp_radio::wifi::AuthenticationMethod::None => "None",
+                    esp_radio::wifi::AuthenticationMethod::Owe => "Owe",
+                    esp_radio::wifi::AuthenticationMethod::WapiPersonal => "WapiPersonal",
+                    esp_radio::wifi::AuthenticationMethod::Wep => "Wep",
+                    esp_radio::wifi::AuthenticationMethod::Wpa => "Wpa",
+                    esp_radio::wifi::AuthenticationMethod::Wpa2Enterprise => "Wpa2Enterprise",
+                    esp_radio::wifi::AuthenticationMethod::Wpa2Personal => "Wpa2Personal",
+                    esp_radio::wifi::AuthenticationMethod::Wpa2Wpa3Enterprise => "Wpa2Wpa3Enterprise",
+                    esp_radio::wifi::AuthenticationMethod::Wpa2Wpa3Personal => "Wpa2Wpa3Personal",
+                    esp_radio::wifi::AuthenticationMethod::Wpa3EntSuiteB192Bit => "Wpa3EntSuiteB192Bit",
+                    esp_radio::wifi::AuthenticationMethod::Wpa3Enterprise => "Wpa3Enterprise",
+                    esp_radio::wifi::AuthenticationMethod::Wpa3ExtPsk => "Wpa3ExtPsk",
+                    esp_radio::wifi::AuthenticationMethod::Wpa3ExtPskMixed => "Wpa3ExtPskMixed",
+                    esp_radio::wifi::AuthenticationMethod::Wpa3Personal => "Wpa3Personal",
+                    esp_radio::wifi::AuthenticationMethod::WpaEnterprise => "WpaEnterprise",
+                    esp_radio::wifi::AuthenticationMethod::WpaWpa2Personal => "WpaWpa2Personal",
+                    _ => "Unknown"
+                };
+
                 // Successfully connected.
                 //
                 // The network stack can now communicate with
                 // the router.
+                info!(
+                    "Successfully connected to the wifi-network (SSID: {}; Authmode: {}). The network stack can now communicat with the router.",
+                    connect_info.ssid.as_str(), 
+                    authmodestr
+                );
                 SYSTEM_STATE.store(
                     SystemState::Running as u8,
                     Ordering::Relaxed,
                 );
             }
 
-            Err(_) => {
+            Err(connection_error) => {
                 // Connection failed.
                 //
                 // Wait before trying again.
+                warn!("Error while conneting to the wifi: {}", connection_error);
                 SYSTEM_STATE.store(
                     SystemState::WifiError as u8,
                     Ordering::Relaxed,
                 );
 
-                Timer::after(Duration::from_secs(5)).await;
+                let wait_duration = Duration::from_secs(5);
+                trace!("Waiting {} before retry...", wait_duration);
+                Timer::after(wait_duration).await;
 
                 continue;
             }
         }
 
-        // Wait until the connection disappears.
+        trace!("Waiting until wifi-connection disappears to then try to reconnect...");
         let _ =
             controller
                 .wait_for_disconnect_async()
                 .await;
 
-        // Connection lost.
-        //
-        // Loop around and reconnect.
-        Timer::after(Duration::from_secs(2)).await;
+        let retry_timeout_duration = Duration::from_secs(2);
+        trace!("Waiting {} before trying to reconnect to wifi...", retry_timeout_duration);
+        Timer::after(retry_timeout_duration).await;
     }
 }
 
@@ -384,7 +398,6 @@ async fn web_server_task(
         [0u8; 2048];
 
     loop {
-
         // Create TCP socket
         let mut socket =
             TcpSocket::new(
@@ -462,16 +475,18 @@ async fn web_server_task(
             )
             .unwrap_or("");
 
+        let mut split = request.split_whitespace();
+
+        let request_type = split.nth(0).unwrap_or("GET");
+
         // HTTP request looks like:
         //
         //     GET / HTTP/1.1
         //
         // The second whitespace-separated item is the path.
-        let path =
-            request
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("/");
+        let path = split.nth(0).unwrap_or("/");
+
+        trace!("Received web request (path: \"{}\", type: \"{}\"). Handling it...", path, request_type);
 
         // Generate response
         let (content_type, body) =
@@ -678,9 +693,7 @@ fn write_number(
     count
 }
 
-/// ============================================================
 /// WS2812 / ADDRESSABLE RGB LED
-/// ============================================================
 ///
 /// The LED expects:
 ///
