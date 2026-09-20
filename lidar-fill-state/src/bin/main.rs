@@ -47,6 +47,8 @@ use static_cell::StaticCell;
 const WIFI_SSID: &str = env!("WIFI_SSID");
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
+const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
+
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SystemState {
@@ -494,29 +496,7 @@ async fn web_server_task(
 
                 "/" => (
                     "text/html",
-                    "\
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset=\"utf-8\">
-    <title>ESP32-C6</title>
-</head>
-
-<body>
-
-    <h1>ESP32-C6</h1>
-
-    <p>Web server is running.</p>
-
-    <p>
-        <a href=\"/hello\">
-            Test endpoint
-        </a>
-    </p>
-
-</body>
-</html>
-",
+                    HTTP_INDEX_HTML,
                 ),
 
                 "/hello" => (
