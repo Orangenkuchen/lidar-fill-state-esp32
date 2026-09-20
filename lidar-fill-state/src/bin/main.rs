@@ -1,9 +1,30 @@
-// Don't use Rust's standard library because ESP32 dont support it
+// Don't use Rust's standard library because ESP32 doesn't support it.
 #![no_std]
-// Don't use Rust's standard main entrypoint (entry will be defined with [esp_rtos::main]).
+
+// Don't use Rust's standard main entrypoint.
+// The entrypoint is provided by #[esp_rtos::main].
 #![no_main]
 
+use core::fmt::{Debug, Display};
 use core::sync::atomic::{AtomicU8, Ordering};
+
+use edge_http::{
+    io::{
+        server::{
+            Connection,
+            DefaultServer,
+            Handler,
+        },
+        Error,
+    },
+    Method,
+};
+use edge_nal::TcpBind;
+use edge_nal_embassy::{
+    Tcp,
+    TcpAccept,
+    TcpBuffers,
+};
 
 use log::{debug, error, info, warn, trace};
 
@@ -21,14 +42,23 @@ use embedded_io_async::{Read, Write};
 
 // ESP_HAL interacts with the hardware components of the esp32
 use esp_hal::{
-    clock::CpuClock, gpio::Level, peripherals::{Peripherals, WIFI}, rmt::{
+    clock::CpuClock,
+    gpio::Level,
+    peripherals::{
+        Peripherals,
+        WIFI
+    }, 
+    rmt::{
         Channel,
         PulseCode,
         Rmt,
         Tx,
         TxChannelConfig,
         TxChannelCreator,
-    }, rng::Rng, time::Rate, timer::timg::TimerGroup,
+    },
+    rng::Rng,
+    time::Rate,
+    timer::timg::TimerGroup
 };
 use esp_println as _;
 
@@ -70,6 +100,8 @@ static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
 ///
 static STACK_RESOURCES: StaticCell<StackResources<4>> =
     StaticCell::new();
+
+static TCP_BUFFERS: StaticCell<TcpBuffers<2, 2048, 2048>> = StaticCell::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -172,9 +204,20 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     debug!("Spawning a task for the web-server...");
+
+
+    let tcp_buffers =
+        TCP_BUFFERS.init(
+            TcpBuffers::new()
+        );
+
+
     spawner.spawn(
-        web_server_task(network_components.stack)
-            .expect("failed to spawn web server task")
+        web_server_task(
+            network_components.stack,
+            tcp_buffers,
+        )
+        .expect("failed to spawn web server task")
     );
 
     loop {
@@ -334,8 +377,11 @@ async fn wifi_task(
                 // The network stack can now communicate with
                 // the router.
                 info!(
-                    "Successfully connected to the wifi-network (SSID: {}; Authmode: {}). The network stack can now communicat with the router.",
-                    connect_info.ssid.as_str(), 
+                    "Successfully connected to the Wi-Fi network \
+                     (SSID: {}; Authmode: {}). \
+                     The network stack can now communicate \
+                     with the router.",
+                    connect_info.ssid.as_str(),
                     authmodestr
                 );
                 SYSTEM_STATE.store(
@@ -388,292 +434,229 @@ async fn net_task(
 /// This Task keeps the web-server running (observing the port 80 and sending responses)
 #[embassy_executor::task]
 async fn web_server_task(
-    stack: Stack<'static>) -> ! {
+    stack: Stack<'static>,
+    tcp_buffers: &'static TcpBuffers<2, 2048, 2048>,
+) -> ! {
 
-    // TCP receive/transmit buffers.
+    // Create the edge-nal TCP adapter.
     //
-    // These are reused for every connection.
-    let mut rx_buffer =
-        [0u8; 2048];
+    // This connects edge-http to embassy-net.
 
-    let mut tx_buffer =
-        [0u8; 2048];
+    let tcp = Tcp::new(stack, tcp_buffers);
+
+    let acceptor = tcp.bind("0.0.0.0:80".parse().unwrap())
+        .await
+        .expect("failed to bind HTTP port 80");
+
+    // Create the HTTP server.
+    let mut server = DefaultServer::new();
+
+
+    info!("HTTP server starting on port 80...");
+
 
     loop {
-        // Create TCP socket
-        let mut socket =
-            TcpSocket::new(
-                stack,
-                &mut rx_buffer,
-                &mut tx_buffer,
-            );
 
-        // Don't allow a client to keep the socket open
-        // forever without sending anything.
-        socket.set_timeout(
-            Some(
-                Duration::from_secs(10)
+        trace!("Waiting for HTTP connections...");
+
+        // embassy-net/smoltcp does not provide a traditional
+        // TCP accept queue.
+        //
+        // edge-http therefore provides a socket-queue based
+        // server specifically for this situation.
+        match server
+            .run_with_socket_queue::<_, _, 2>(
+                None,
+                acceptor,
+                HttpHandler,
             )
-        );
-
-        // Listen on HTTP port 80
-        if socket
-            .accept(80)
             .await
-            .is_err()
         {
-            continue;
-        }
 
-        // Receive HTTP request
-        let mut request =
-            [0u8; 1024];
-
-        let mut request_len = 0usize;
-
-
-        loop {
-
-            if request_len >= request.len() {
-                break;
+            Ok(()) => {
+                warn!("HTTP server stopped; restarting...");
             }
 
-            match socket
-                .read(
-                    &mut request[request_len..]
-                )
-                .await
-            {
+            Err(error) => {
 
-                Ok(0) => {
-                    break;
-                }
+                error!("HTTP server error: {:?}", error);
 
-                Ok(n) => {
+                // Give the network stack a moment before
+                // restarting the server.
+                Timer::after(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
 
-                    request_len += n;
 
-                    // HTTP headers end with:
-                    //
-                    //     \r\n\r\n
-                    if request[..request_len]
-                        .windows(4)
-                        .any(|x| x == b"\r\n\r\n")
-                    {
+// ============================================================
+// HTTP HANDLER
+// ============================================================
+
+struct HttpHandler;
+
+
+impl Handler for HttpHandler {
+
+    type Error<E>
+        = edge_http::io::Error<E>
+    where
+        E: Debug;
+
+
+    async fn handle<T, const N: usize>(
+        &self,
+        _task_id: impl Display + Copy,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<
+        (),
+        Self::Error<T::Error>
+    >
+    where
+        T: Read + Write,
+    {
+
+        // edge-http has already parsed the HTTP request
+        // headers for us.
+        let headers = conn.headers()?;
+
+        trace!("Received web request: {:?} {}", headers.method, headers.path);
+
+        match (headers.method, headers.path) {
+
+            // =================================================
+            // GET /
+            // =================================================
+
+            (Method::Get, "/") => {
+
+                conn.initiate_response(
+                    200,
+                    Some("OK"),
+                    &[
+                        (
+                            "Content-Type",
+                            "text/html",
+                        ),
+                    ],
+                ).await?;
+
+                conn.write_all(HTTP_INDEX_HTML.as_bytes()).await?;
+            }
+
+            // =================================================
+            // GET /hello
+            // =================================================
+            (Method::Get, "/hello") => {
+
+                let body =
+                    b"Hello from the ESP32-C6!\n";
+
+
+                conn.initiate_response(
+                    200,
+                    Some("OK"),
+                    &[
+                        (
+                            "Content-Type",
+                            "text/plain",
+                        ),
+                    ],
+                ).await?;
+
+                conn.write_all(body).await?;
+            }
+
+            // =================================================
+            // POST /upload
+            // =================================================
+            //
+            // For now this receives the HTTP body.
+            //
+            // The body can be streamed into a filesystem
+            // without putting the entire uploaded file into
+            // RAM.
+            // =================================================
+            (Method::Post, "/upload") => {
+
+                info!(
+                    "Receiving file upload..."
+                );
+
+                // Small streaming buffer.
+                //
+                // The uploaded file does NOT need to fit
+                // into RAM.
+                let mut buffer =
+                    [0u8; 1024];
+
+                let mut total_bytes =
+                    0usize;
+
+                loop {
+                    let n = conn.read(&mut buffer).await?;
+
+                    if n == 0 {
                         break;
                     }
+
+                    total_bytes += n;
+
+                    trace!("Received {} bytes", n);
+
+                    // TODO:
+                    //
+                    // Write the bytes to your
+                    // filesystem/storage here:
+                    //
+                    // file.write_all(
+                    //     &buffer[..n]
+                    // ).await?;
                 }
 
-                Err(_) => {
-                    break;
-                }
+                info!("File upload complete: {} bytes", total_bytes);
+
+                conn.initiate_response(
+                    200,
+                    Some("OK"),
+                    &[
+                        (
+                            "Content-Type",
+                            "text/plain",
+                        ),
+                    ],
+                ).await?;
+
+                conn.write_all(b"Upload successful\n").await?;
+            }
+
+            // =================================================
+            // UNKNOWN ROUTE
+            // =================================================
+            _ => {
+                conn.initiate_response(
+                    404,
+                    Some("Not Found"),
+                    &[
+                        (
+                            "Content-Type",
+                            "text/plain",
+                        ),
+                    ],
+                ).await?;
+
+
+                conn.write_all(b"404 Not Found\n").await?;
             }
         }
 
-        // Parse HTTP request
-        let request =
-            core::str::from_utf8(
-                &request[..request_len]
-            )
-            .unwrap_or("");
 
-        let mut split = request.split_whitespace();
-
-        let request_type = split.nth(0).unwrap_or("GET");
-
-        // HTTP request looks like:
-        //
-        //     GET / HTTP/1.1
-        //
-        // The second whitespace-separated item is the path.
-        let path = split.nth(0).unwrap_or("/");
-
-        trace!("Received web request (path: \"{}\", type: \"{}\"). Handling it...", path, request_type);
-
-        // Generate response
-        let (content_type, body) =
-            match path {
-
-                "/" => (
-                    "text/html",
-                    HTTP_INDEX_HTML,
-                ),
-
-                "/hello" => (
-                    "text/plain",
-                    "Hello from the ESP32-C6!\n",
-                ),
-
-                _ => (
-                    "text/plain",
-                    "404 Not Found\n",
-                ),
-            };
-
-        // HTTP response header
-        let status =
-            if path == "/"
-                || path == "/hello"
-            {
-                "200 OK"
-            } else {
-                "404 Not Found"
-            };
-
-        // Build response header.
-        //
-        // We don't need dynamic allocation here.
-        let mut header =
-            [0u8; 256];
-
-        let header_text =
-            format_http_header(
-                &mut header,
-                status,
-                content_type,
-                body.len(),
-            );
-
-        // Send response
-        let _ =
-            socket
-                .write_all(header_text)
-                .await;
-
-        let _ =
-            socket
-                .write_all(body.as_bytes())
-                .await;
-
-        let _ =
-            socket.flush().await;
-
-
-        //
-        // Connection is closed automatically when the socket
-        // goes out of scope.
-        //
+        Ok(())
     }
 }
 
-/// HTTP HEADER BUILDER
-fn format_http_header<'a>(
-    buffer: &'a mut [u8],
-    status: &str,
-    content_type: &str,
-    content_length: usize) -> &'a [u8] {
-
-    // We construct:
-    //
-    // HTTP/1.1 200 OK
-    // Content-Type: text/html
-    // Content-Length: 123
-    // Connection: close
-    //
-    // ...
-    let mut pos = 0;
-
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        b"HTTP/1.1 ",
-    );
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        status.as_bytes(),
-    );
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        b"\r\nContent-Type: ",
-    );
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        content_type.as_bytes(),
-    );
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        b"\r\nContent-Length: ",
-    );
-
-
-    pos += write_number(
-        &mut buffer[pos..],
-        content_length,
-    );
-
-
-    pos += copy_into(
-        &mut buffer[pos..],
-        b"\r\nConnection: close\r\n\r\n",
-    );
-
-
-    &buffer[..pos]
-}
-
-/// COPY BYTES
-fn copy_into(
-    destination: &mut [u8],
-    source: &[u8]) -> usize {
-
-    let length =
-        core::cmp::min(
-            destination.len(),
-            source.len(),
-        );
-
-    destination[..length]
-        .copy_from_slice(
-            &source[..length]
-        );
-
-    length
-}
-
-/// WRITE DECIMAL NUMBER
-fn write_number(
-    buffer: &mut [u8],
-    mut number: usize) -> usize {
-
-    if number == 0 {
-        buffer[0] = b'0';
-        return 1;
-    }
-
-    let mut digits =
-        [0u8; 20];
-
-    let mut count = 0;
-
-    while number > 0 {
-
-        digits[count] =
-            b'0' + (number % 10) as u8;
-
-        number /= 10;
-
-        count += 1;
-    }
-
-    // Reverse digits.
-    let mut i = 0;
-
-    while i < count {
-
-        buffer[i] =
-            digits[count - 1 - i];
-
-        i += 1;
-    }
-
-    count
-}
-
-/// WS2812 / ADDRESSABLE RGB LED
+/// Generates the RMT data for a WS2812.
 ///
 /// The LED expects:
 ///
