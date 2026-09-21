@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <title>Datei hochladen</title>
+</head>
+<body>
+    <h1>Datei hochladen</h1>
+
+    <input id="file" type="file">
+    <button onclick="upload()">Hochladen</button>
+
+    <p id="status"></p>
+
+    <script>
+        async function upload() {
+            const input = document.getElementById("file");
+            const status = document.getElementById("status");
+
+            if (!input.files.length) {
+                status.textContent = "Bitte eine Datei auswählen.";
+                return;
+            }
+
+            status.textContent = "Upload läuft...";
+
+            const response = await fetch("/upload", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/octet-stream"
+                },
+                body: input.files[0]
+            });
+
+            status.textContent = await response.text();
+        }
+    </script>
+</body>
+</html>
