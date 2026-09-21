@@ -74,10 +74,26 @@ use esp_radio::wifi::{
 
 use static_cell::StaticCell;
 
+use littlefs_rust::{
+    Config, Filesystem, OpenFlags, Storage,
+};
+
+use esp_storage::FlashStorage;
+
+use embassy_sync::{
+    blocking_mutex::raw::NoopRawMutex,
+    mutex::Mutex,
+};
+
+const STORAGE_OFFSET: u32 = 0x1F0000;
+const STORAGE_BLOCK_SIZE: u32 = 4096;
+const STORAGE_BLOCK_COUNT: u32 = 528;
+
 const WIFI_SSID: &str = env!("WIFI_SSID");
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
 const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
+const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,12 +117,16 @@ static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
 static STACK_RESOURCES: StaticCell<StackResources<4>> =
     StaticCell::new();
 
-static TCP_BUFFERS: StaticCell<TcpBuffers<2, 2048, 2048>> = StaticCell::new();
+static TCP_BUFFERS: StaticCell<TcpBuffers<1, 512, 512>> =
+    StaticCell::new();
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    // TODO: Handle error better. Maybe LED?
-    loop {}
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    esp_println::println!("PANIC: {}", info);
+
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 // Put the application metadata into the firmware in the format the ESP32 bootloader expects.
@@ -132,6 +152,7 @@ async fn main(spawner: Spawner) -> ! {
         RMT,
         TIMG0,
         FROM_CPU_INTR0,
+        FLASH,
         ..
     } = peripherals;
 
@@ -205,22 +226,29 @@ async fn main(spawner: Spawner) -> ! {
 
     debug!("Spawning a task for the web-server...");
 
-
     let tcp_buffers =
         TCP_BUFFERS.init(
             TcpBuffers::new()
         );
 
+    let filesystem = FILESYSTEM.init(
+        Mutex::new(init_filesystem(FLASH))
+    );
+
+    log_heap_usage();
 
     spawner.spawn(
         web_server_task(
             network_components.stack,
             tcp_buffers,
+            filesystem,
         )
         .expect("failed to spawn web server task")
     );
 
     loop {
+        log_heap_usage();
+
         Timer::after(
             Duration::from_secs(60)
         ).await;
@@ -435,67 +463,52 @@ async fn net_task(
 #[embassy_executor::task]
 async fn web_server_task(
     stack: Stack<'static>,
-    tcp_buffers: &'static TcpBuffers<2, 2048, 2048>,
+    tcp_buffers: &'static TcpBuffers<1, 512, 512>,
+    filesystem: &'static Mutex<
+        NoopRawMutex,
+        Filesystem<LittleFsStorage<'static>>,
+    >,
 ) -> ! {
-
-    // Create the edge-nal TCP adapter.
-    //
-    // This connects edge-http to embassy-net.
-
     let tcp = Tcp::new(stack, tcp_buffers);
 
     let acceptor = tcp.bind("0.0.0.0:80".parse().unwrap())
         .await
         .expect("failed to bind HTTP port 80");
 
-    // Create the HTTP server.
     let mut server = DefaultServer::new();
-
 
     info!("HTTP server starting on port 80...");
 
-
     loop {
-
         trace!("Waiting for HTTP connections...");
 
-        // embassy-net/smoltcp does not provide a traditional
-        // TCP accept queue.
-        //
-        // edge-http therefore provides a socket-queue based
-        // server specifically for this situation.
         match server
-            .run_with_socket_queue::<_, _, 2>(
+            .run_with_socket_queue::<_, _, 1>(
                 None,
                 acceptor,
-                HttpHandler,
+                HttpHandler { filesystem },
             )
             .await
         {
-
-            Ok(()) => {
-                warn!("HTTP server stopped; restarting...");
-            }
-
+            Ok(()) => warn!("HTTP server stopped; restarting..."),
             Err(error) => {
-
                 error!("HTTP server error: {:?}", error);
-
-                // Give the network stack a moment before
-                // restarting the server.
                 Timer::after(Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-
 // ============================================================
 // HTTP HANDLER
 // ============================================================
 
-struct HttpHandler;
-
+struct HttpHandler {
+    filesystem: &'static Mutex<
+        NoopRawMutex,
+        Filesystem<LittleFsStorage<'static>>,
+    >,
+}
 
 impl Handler for HttpHandler {
 
@@ -568,6 +581,16 @@ impl Handler for HttpHandler {
                 conn.write_all(body).await?;
             }
 
+            (Method::Get, "/upload") => {
+                conn.initiate_response(
+                    200,
+                    Some("OK"),
+                    &[("Content-Type", "text/html; charset=utf-8")],
+                ).await?;
+
+                conn.write_all(HTTP_UPLOAD_HTML.as_bytes()).await?;
+            }
+
             // =================================================
             // POST /upload
             // =================================================
@@ -579,20 +602,11 @@ impl Handler for HttpHandler {
             // RAM.
             // =================================================
             (Method::Post, "/upload") => {
+                info!("Receiving file upload...");
 
-                info!(
-                    "Receiving file upload..."
-                );
-
-                // Small streaming buffer.
-                //
-                // The uploaded file does NOT need to fit
-                // into RAM.
-                let mut buffer =
-                    [0u8; 1024];
-
-                let mut total_bytes =
-                    0usize;
+                let mut buffer = [0u8; 1024];
+                let mut total_bytes = 0usize;
+                let mut first_chunk = true;
 
                 loop {
                     let n = conn.read(&mut buffer).await?;
@@ -601,18 +615,57 @@ impl Handler for HttpHandler {
                         break;
                     }
 
+                    let flags = if first_chunk {
+                        OpenFlags::CREATE
+                            | OpenFlags::WRITE
+                            | OpenFlags::TRUNC
+                    } else {
+                        OpenFlags::WRITE
+                            | OpenFlags::APPEND
+                    };
+
+                    let write_result = {
+                        let mut fs = self.filesystem.lock().await;
+                        let mut file = fs.open("Test.bin", flags);
+
+                        match file {
+                            Ok(mut file) => file.write(&buffer[..n]),
+                            Err(error) => {
+                                error!("Could not open Test.bin: {:?}", error);
+                                Err(error)
+                            }
+                        }
+                    };
+
+                    if let Err(error) = write_result {
+                        error!("File write failed: {:?}", error);
+
+                        conn.initiate_response(
+                            500,
+                            Some("Internal Server Error"),
+                            &[("Content-Type", "text/plain")],
+                        ).await?;
+
+                        conn.write_all(b"Upload failed\n").await?;
+                        return Ok(());
+                    }
+
+                    first_chunk = false;
                     total_bytes += n;
+                }
 
-                    trace!("Received {} bytes", n);
+                // Auch eine leere Datei erzeugen beziehungsweise leeren.
+                if first_chunk {
+                    let mut fs = self.filesystem.lock().await;
 
-                    // TODO:
-                    //
-                    // Write the bytes to your
-                    // filesystem/storage here:
-                    //
-                    // file.write_all(
-                    //     &buffer[..n]
-                    // ).await?;
+                    if let Err(error) = fs.open(
+                        "Test.bin",
+                        OpenFlags::CREATE
+                            | OpenFlags::WRITE
+                            | OpenFlags::TRUNC,
+                    ) {
+                        error!("Could not create Test.bin: {:?}", error);
+                    }
                 }
 
                 info!("File upload complete: {} bytes", total_bytes);
@@ -620,15 +673,56 @@ impl Handler for HttpHandler {
                 conn.initiate_response(
                     200,
                     Some("OK"),
-                    &[
-                        (
-                            "Content-Type",
-                            "text/plain",
-                        ),
-                    ],
+                    &[("Content-Type", "text/plain")],
                 ).await?;
 
                 conn.write_all(b"Upload successful\n").await?;
+            }
+
+            (Method::Get, "/file") => {
+                info!("Sending Test.bin...");
+
+                conn.initiate_response(
+                    200,
+                    Some("OK"),
+                    &[("Content-Type", "application/octet-stream")],
+                ).await?;
+
+                let mut buffer = [0u8; 1024];
+
+                let mut fs = self.filesystem.lock().await;
+
+                match fs.open("Test.bin", OpenFlags::READ) {
+                    Ok(mut file) => {
+                        loop {
+                            let n = match file.read(&mut buffer) {
+                                Ok(n) => n,
+                                Err(error) => {
+                                    error!("File read failed: {:?}", error);
+                                    break;
+                                }
+                            };
+
+                            if n == 0 {
+                                break;
+                            }
+
+                            conn.write_all(&buffer[..n as usize]).await?;
+                        }
+                    }
+
+                    Err(error) => {
+                        error!("Could not open Test.bin: {:?}", error);
+
+                        conn.initiate_response(
+                            404,
+                            Some("Not Found"),
+                            &[("Content-Type", "text/plain")],
+                        ).await?;
+
+                        conn.write_all(b"File not found\n").await?;
+                    }
+                }
             }
 
             // =================================================
@@ -810,7 +904,6 @@ async fn show_led_sequence(
         Timer::after(led_flash.duration).await;
     }
 }
-
 struct LedFlash {
     r: u8,
     g: u8,
@@ -822,4 +915,202 @@ struct NetworkComponents<'a> {
     runner: Runner<'static, Interface>,
     wifi_controller: WifiController<'a>,
     stack: Stack<'a>
+}
+
+pub struct LittleFsStorage<'d> {
+    flash: FlashStorage<'d>,
+}
+
+impl<'d> LittleFsStorage<'d> {
+    pub fn new(flash: FlashStorage<'d>) -> Self {
+        Self { flash }
+    }
+
+    fn address(block: u32, offset: u32) -> u32 {
+        STORAGE_OFFSET + block * STORAGE_BLOCK_SIZE + offset
+    }
+}
+
+impl Storage for LittleFsStorage<'_> {
+    fn read(
+        &mut self,
+        block: u32,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<(), littlefs_rust::Error> {
+        let address = Self::address(block, offset);
+
+        info!(
+            "LFS READ: block={} offset={} len={} address=0x{:08X}",
+            block,
+            offset,
+            buf.len(),
+            address
+        );
+
+        let result = self.flash
+            .read_nor(address, buf)
+            .map_err(|e| {
+                error!(
+                    "LFS READ FAILED: block={} offset={} len={} address=0x{:08X} error={:?}",
+                    block,
+                    offset,
+                    buf.len(),
+                    address,
+                    e
+                );
+
+                littlefs_rust::Error::Io
+            });
+
+        info!(
+            "LFS READ DONE: block={} offset={} len={}",
+            block,
+            offset,
+            buf.len()
+        );
+
+        result
+    }
+
+
+    fn write(
+        &mut self,
+        block: u32,
+        offset: u32,
+        data: &[u8],
+    ) -> Result<(), littlefs_rust::Error> {
+        let address = Self::address(block, offset);
+
+        info!(
+            "LFS WRITE: block={} offset={} len={} address=0x{:08X}",
+            block,
+            offset,
+            data.len(),
+            address
+        );
+
+        self.flash
+            .write_nor(address, data)
+            .map_err(|_| {
+                error!(
+                    "LFS WRITE FAILED: block={} offset={} len={} address=0x{:08X}",
+                    block,
+                    offset,
+                    data.len(),
+                    address
+                );
+
+                littlefs_rust::Error::Io
+            })?;
+
+        info!(
+            "LFS WRITE DONE: block={} offset={} len={}",
+            block,
+            offset,
+            data.len()
+        );
+
+        Ok(())
+    }
+
+    fn erase(
+        &mut self,
+        block: u32,
+    ) -> Result<(), littlefs_rust::Error> {
+        let address = Self::address(block, 0);
+
+        info!(
+            "LFS ERASE: block={} address=0x{:08X}",
+            block,
+            address
+        );
+
+        self.flash
+            .erase(address, address + STORAGE_BLOCK_SIZE)
+            .map_err(|_| {
+                error!(
+                    "LFS ERASE FAILED: block={} address=0x{:08X}",
+                    block,
+                    address
+                );
+
+                littlefs_rust::Error::Io
+            })?;
+
+        info!(
+            "LFS ERASE DONE: block={}",
+            block
+        );
+
+        Ok(())
+    }
+
+
+    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
+        Ok(())
+    }
+}
+
+fn init_filesystem(
+    flash: esp_hal::peripherals::FLASH<'static>,
+) -> Filesystem<LittleFsStorage<'static>> {
+    let storage = LittleFsStorage::new(
+        FlashStorage::new(flash),
+    );
+
+    let mut config = Config::new(
+        STORAGE_BLOCK_SIZE,
+        STORAGE_BLOCK_COUNT,
+    );
+    config.cache_size = 512;
+
+    match Filesystem::mount(storage, config) {
+        Ok(filesystem) => {
+            info!("LittleFS mounted successfully!");
+            filesystem
+        }
+
+        Err((littlefs_rust::Error::Corrupt, mut storage)) => {
+            warn!("LittleFS is corrupt or unformatted. Formatting...");
+
+            let mut format_config = Config::new(
+                STORAGE_BLOCK_SIZE,
+                STORAGE_BLOCK_COUNT,
+            );
+            format_config.cache_size = 512;
+
+            Filesystem::format(
+                &mut storage,
+                &format_config,
+            )
+            .expect("LittleFS format failed");
+
+            Filesystem::mount(storage, format_config)
+                .map_err(|(error, _)| error)
+                .expect("LittleFS mount after format failed")
+        }
+
+        Err((error, _)) => {
+            panic!("LittleFS mount failed: {:?}", error);
+        }
+    }
+}
+
+static FILESYSTEM: StaticCell<
+    Mutex<NoopRawMutex, Filesystem<LittleFsStorage<'static>>>
+> = StaticCell::new();
+
+fn log_heap_usage() {
+    let used = esp_alloc::HEAP.used();
+    let free = esp_alloc::HEAP.free();
+    let total = used + free;
+
+    info!(
+        "Heap: used={} B, free={} B, total={} B ({}%)",
+        used,
+        free,
+        total,
+        used * 100 / total
+    );
 }
