@@ -1,0 +1,15 @@
+body {
+    --background-color: white;
+    --font-color: black;
+    
+    background-color: var(--background-color);
+    color: var(--font-color);
+    font-family: "Ubuntu", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        --background-color: #191a1b;
+        --font-color: white;
+    }
+}

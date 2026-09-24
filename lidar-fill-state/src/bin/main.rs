@@ -1,37 +1,32 @@
 // Don't use Rust's standard library because ESP32 doesn't support it.
 #![no_std]
-
 // Don't use Rust's standard main entrypoint.
 // The entrypoint is provided by #[esp_rtos::main].
 #![no_main]
 
-use core::fmt::{Debug, Display};
+use core::fmt::{Debug, Display, Write as FmtWrite};
+use core::ffi::c_void;
+use core::mem::size_of;
 use core::sync::atomic::{AtomicU8, Ordering};
-
 use edge_http::{
     io::{
         server::{
             Connection,
             DefaultServer,
             Handler,
-        },
-        Error,
+        }
     },
     Method,
 };
 use edge_nal::TcpBind;
 use edge_nal_embassy::{
     Tcp,
-    TcpAccept,
     TcpBuffers,
 };
-
+use esp_radio::wifi::DisconnectReason;
 use log::{debug, error, info, warn, trace};
-
-// Embassy is an asynchronous embedded framework 
 use embassy_executor::Spawner;
 use embassy_net::{
-    tcp::TcpSocket,
     Config as NetConfig,
     Runner,
     Stack,
@@ -39,13 +34,10 @@ use embassy_net::{
 };
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
-
-// ESP_HAL interacts with the hardware components of the esp32
 use esp_hal::{
     clock::CpuClock,
     gpio::Level,
     peripherals::{
-        Peripherals,
         WIFI
     }, 
     rmt::{
@@ -58,12 +50,12 @@ use esp_hal::{
     },
     rng::Rng,
     time::Rate,
-    timer::timg::TimerGroup
+    timer::timg::TimerGroup,
+    Blocking,
 };
+use esp_hal::i2c::master::I2c;
 use esp_println as _;
-
 use heapless::Vec;
-
 use esp_radio::wifi::{
     AuthenticationMethodConfig,
     Config as WifiConfig,
@@ -71,29 +63,15 @@ use esp_radio::wifi::{
     WifiController,
     sta::StationConfig,
 };
-
 use static_cell::StaticCell;
-
 use littlefs_rust::{
     Config, Filesystem, OpenFlags, Storage,
 };
-
 use esp_storage::FlashStorage;
-
 use embassy_sync::{
     blocking_mutex::raw::NoopRawMutex,
     mutex::Mutex,
 };
-
-const STORAGE_OFFSET: u32 = 0x1F0000;
-const STORAGE_BLOCK_SIZE: u32 = 4096;
-const STORAGE_BLOCK_COUNT: u32 = 528;
-
-const WIFI_SSID: &str = env!("WIFI_SSID");
-const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
-
-const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
-const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,21 +81,45 @@ enum SystemState {
     WifiError = 2,
     SensorError = 3,
 }
+/// The index where the storage partition starts
+fn storage_offset() -> u32 {
+    u32::from_str_radix(
+        env!("STORAGE_PARTITION_START_INDEX").trim_start_matches("0x"),
+        16,
+    )
+    .unwrap()
+}
+/// The size of a storage block
+const STORAGE_BLOCK_SIZE: u32 = 4 * 1_024;
+/// The amount of blocks in the storage
+const STORAGE_BLOCK_COUNT: u32 = 528;
+/// The size of the cache for the file system
+const FILE_SYSTEM_CACHE_SIZE: u32 = 4 * 1_024;
+/// The ssid of the wlan to connect to
+const WIFI_SSID: &str = env!("WIFI_SSID");
+/// The wifi password to use
+const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
+/// The html of the index page of the webserver
+const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
+/// The html of the upload page of the webserver
+const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
+/// The base css of the web pages of the webserver
+const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/base_style.css");
 
+/// The state of the system
+/// 
+/// Primarily used for the RGB led on the esp32
 static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
-
 /// STATIC NETWORK MEMORY
 ///
 /// embassy-net needs memory that lives for the entire lifetime
 /// of the program.
 ///
-/// StackResources<4> gives the network stack room for several
+/// StackResources<8> gives the network stack room for several
 /// sockets.
-///
-static STACK_RESOURCES: StaticCell<StackResources<4>> =
+static STACK_RESOURCES: StaticCell<StackResources<8>> =
     StaticCell::new();
-
-static TCP_BUFFERS: StaticCell<TcpBuffers<1, 512, 512>> =
+static TCP_BUFFERS: StaticCell<TcpBuffers<1, 8192, 8192>> =
     StaticCell::new();
 
 #[panic_handler]
@@ -132,8 +134,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // Put the application metadata into the firmware in the format the ESP32 bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// This macro sets up the ESP RTOS/Embassy runtime.
-#[esp_rtos::main]
+/// The main program
+#[esp_rtos::main] // This macro sets up the ESP RTOS/Embassy runtime.
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger(log::LevelFilter::Trace);
 
@@ -157,9 +159,14 @@ async fn main(spawner: Spawner) -> ! {
     } = peripherals;
 
     // This creates a heap. The heap is used by things that require dynamic allocation.
+    // Heap from the main ram (shared with on borad peripherals)
+    esp_alloc::heap_allocator!(
+        size: 100 * 1024
+    );
+    // Heap from the bootloader ram
     esp_alloc::heap_allocator!(
         #[esp_hal::ram(reclaimed)]
-        size: 65536
+        size: 64 * 1024
     );
 
     // Start Embassy runtime with the ESP32's Timergroup 0.
@@ -200,6 +207,21 @@ async fn main(spawner: Spawner) -> ! {
     trace!("Setting up the network and wifi components...");
     let network_components = setup_network(WIFI);
 
+    // let i2c = I2c::new(
+    //     peripherals.I2C0,
+    //     esp_hal::i2c::master::Config::default()
+    //         .with_frequency(esp_hal::time::Rate::from_khz(400)),
+    // )
+    // .unwrap()
+    // .with_sda(peripherals.GPIO6)
+    // .with_scl(peripherals.GPIO7);
+
+    // debug!("Spawning VL53L8CX sensor task...");
+    // spawner.spawn(
+    //     sensor_task(i2c)
+    //         .expect("failed to spawn sensor task")
+    // );
+
     // START NETWORK TASK
     //
     // The runner MUST run continuously.
@@ -225,7 +247,6 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     debug!("Spawning a task for the web-server...");
-
     let tcp_buffers =
         TCP_BUFFERS.init(
             TcpBuffers::new()
@@ -234,8 +255,6 @@ async fn main(spawner: Spawner) -> ! {
     let filesystem = FILESYSTEM.init(
         Mutex::new(init_filesystem(FLASH))
     );
-
-    log_heap_usage();
 
     spawner.spawn(
         web_server_task(
@@ -247,10 +266,11 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     loop {
+        log_static_sizes();
         log_heap_usage();
 
         Timer::after(
-            Duration::from_secs(60)
+            Duration::from_secs(300)
         ).await;
     }
 }
@@ -422,7 +442,26 @@ async fn wifi_task(
                 // Connection failed.
                 //
                 // Wait before trying again.
-                warn!("Error while conneting to the wifi: {}", connection_error);
+                let reason = match connection_error {
+                    esp_radio::wifi::ConnectionError::Failed(disconnected_info) =>
+                        to_string(disconnected_info.reason),
+
+                    esp_radio::wifi::ConnectionError::WifiError(wifi_error) => {
+                        match wifi_error {
+                            esp_radio::wifi::WifiError::InvalidArguments => "InvalidArguments",
+                            esp_radio::wifi::WifiError::InvalidPassword => "InvalidPassword",
+                            esp_radio::wifi::WifiError::InvalidSsid => "InvalidSsid",
+                            esp_radio::wifi::WifiError::NotConnected => "NotConnected",
+                            esp_radio::wifi::WifiError::Other => "Other",
+                            esp_radio::wifi::WifiError::OutOfMemory => "OutOfMemory",
+                            esp_radio::wifi::WifiError::Unsupported => "Unsupported",
+                            _ => "Unknown"
+                        }
+                    }
+
+                    _ => "Unknown"
+                };
+                warn!("Error while conneting to the wifi: {}", reason);
                 SYSTEM_STATE.store(
                     SystemState::WifiError as u8,
                     Ordering::Relaxed,
@@ -463,7 +502,7 @@ async fn net_task(
 #[embassy_executor::task]
 async fn web_server_task(
     stack: Stack<'static>,
-    tcp_buffers: &'static TcpBuffers<1, 512, 512>,
+    tcp_buffers: &'static TcpBuffers<1, 8192, 8192>,
     filesystem: &'static Mutex<
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
@@ -510,243 +549,241 @@ struct HttpHandler {
     >,
 }
 
-impl Handler for HttpHandler {
+impl HttpHandler {
+    async fn handle_get_root<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "text/html; charset=utf-8")],
+        ).await?;
 
+        conn.write_all(HTTP_INDEX_HTML.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn handle_get_hello<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "text/plain")],
+        ).await?;
+
+        conn.write_all(b"Hello from the ESP32-C6!\n").await?;
+        Ok(())
+    }
+
+    async fn handle_get_upload<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "text/html; charset=utf-8")],
+        ).await?;
+
+        conn.write_all(HTTP_UPLOAD_HTML.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn handle_post_upload<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        info!("Receiving file upload...");
+
+        let mut buffer = [0u8; 8192];
+        let mut total_bytes = 0usize;
+
+        let fs = self.filesystem.lock().await;
+        let file = match fs.open(
+            "Test.bin",
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNC,
+        ) {
+            Ok(file) => file,
+            Err(error) => {
+                error!("Could not open Test.bin: {:?}", error);
+                conn.initiate_response(
+                    500,
+                    Some("Internal Server Error"),
+                    &[("Content-Type", "text/plain")],
+                ).await?;
+                conn.write_all(b"Upload failed\n").await?;
+                return Ok(());
+            }
+        };
+
+        loop {
+            let n = conn.read(&mut buffer).await?;
+
+            if n == 0 {
+                break;
+            }
+
+            if let Err(error) = file.write(&buffer[..n]) {
+                error!("File write failed: {:?}", error);
+                conn.initiate_response(
+                    500,
+                    Some("Internal Server Error"),
+                    &[("Content-Type", "text/plain")],
+                ).await?;
+                conn.write_all(b"Upload failed\n").await?;
+                return Ok(());
+            }
+
+            total_bytes += n;
+        }
+
+        info!("File upload complete: {} bytes", total_bytes);
+
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "text/plain")],
+        ).await?;
+
+        conn.write_all(b"Upload successful\n").await?;
+        Ok(())
+    }
+
+    async fn handle_get_file<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        info!("Sending Test.bin...");
+
+        let mut buffer = [0u8; 1024];
+
+        let mut fs = self.filesystem.lock().await;
+
+        let mut file = match fs.open("Test.bin", OpenFlags::READ) {
+            Ok(file) => file,
+            Err(error) => {
+                error!("Could not open Test.bin: {:?}", error);
+                conn.initiate_response(
+                    404,
+                    Some("Not Found"),
+                    &[("Content-Type", "text/plain")],
+                ).await?;
+                conn.write_all(b"File not found\n").await?;
+                return Ok(());
+            }
+        };
+
+        let mut content_length = heapless::String::<10>::new();
+        write!(content_length, "{}", file.size()).unwrap();
+
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Length", content_length.as_str()),
+                ("Content-Disposition", "attachment; filename=\"Test.bin\"")
+            ],
+        ).await?;
+
+        loop {
+            let n = match file.read(&mut buffer) {
+                Ok(n) => n,
+                Err(error) => {
+                    error!("File read failed: {:?}", error);
+                    return Ok(());
+                }
+            };
+
+            if n == 0 {
+                return Ok(());
+            }
+
+            conn.write_all(&buffer[..n as usize]).await?;
+        }
+    }
+
+    /// Returns the base_style.css
+    async fn handle_get_base_css<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "text/css")],
+        ).await?;
+
+        conn.write_all(HTTP_BASE_STYLE_CSS.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn handle_not_found<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            404,
+            Some("Not Found"),
+            &[("Content-Type", "text/plain")],
+        ).await?;
+
+        conn.write_all(b"404 Not Found\n").await?;
+        Ok(())
+    }
+}
+
+impl Handler for HttpHandler {
     type Error<E>
         = edge_http::io::Error<E>
     where
         E: Debug;
 
-
     async fn handle<T, const N: usize>(
         &self,
         _task_id: impl Display + Copy,
         conn: &mut Connection<'_, T, N>,
-    ) -> Result<
-        (),
-        Self::Error<T::Error>
-    >
+    ) -> Result<(), Self::Error<T::Error>>
     where
         T: Read + Write,
     {
-
-        // edge-http has already parsed the HTTP request
-        // headers for us.
         let headers = conn.headers()?;
 
         trace!("Received web request: {:?} {}", headers.method, headers.path);
 
         match (headers.method, headers.path) {
-
-            // =================================================
-            // GET /
-            // =================================================
-
-            (Method::Get, "/") => {
-
-                conn.initiate_response(
-                    200,
-                    Some("OK"),
-                    &[
-                        (
-                            "Content-Type",
-                            "text/html",
-                        ),
-                    ],
-                ).await?;
-
-                conn.write_all(HTTP_INDEX_HTML.as_bytes()).await?;
-            }
-
-            // =================================================
-            // GET /hello
-            // =================================================
-            (Method::Get, "/hello") => {
-
-                let body =
-                    b"Hello from the ESP32-C6!\n";
-
-
-                conn.initiate_response(
-                    200,
-                    Some("OK"),
-                    &[
-                        (
-                            "Content-Type",
-                            "text/plain",
-                        ),
-                    ],
-                ).await?;
-
-                conn.write_all(body).await?;
-            }
-
-            (Method::Get, "/upload") => {
-                conn.initiate_response(
-                    200,
-                    Some("OK"),
-                    &[("Content-Type", "text/html; charset=utf-8")],
-                ).await?;
-
-                conn.write_all(HTTP_UPLOAD_HTML.as_bytes()).await?;
-            }
-
-            // =================================================
-            // POST /upload
-            // =================================================
-            //
-            // For now this receives the HTTP body.
-            //
-            // The body can be streamed into a filesystem
-            // without putting the entire uploaded file into
-            // RAM.
-            // =================================================
-            (Method::Post, "/upload") => {
-                info!("Receiving file upload...");
-
-                let mut buffer = [0u8; 1024];
-                let mut total_bytes = 0usize;
-                let mut first_chunk = true;
-
-                loop {
-                    let n = conn.read(&mut buffer).await?;
-
-                    if n == 0 {
-                        break;
-                    }
-
-                    let flags = if first_chunk {
-                        OpenFlags::CREATE
-                            | OpenFlags::WRITE
-                            | OpenFlags::TRUNC
-                    } else {
-                        OpenFlags::WRITE
-                            | OpenFlags::APPEND
-                    };
-
-                    let write_result = {
-                        let mut fs = self.filesystem.lock().await;
-                        let mut file = fs.open("Test.bin", flags);
-
-                        match file {
-                            Ok(mut file) => file.write(&buffer[..n]),
-                            Err(error) => {
-                                error!("Could not open Test.bin: {:?}", error);
-                                Err(error)
-                            }
-                        }
-                    };
-
-                    if let Err(error) = write_result {
-                        error!("File write failed: {:?}", error);
-
-                        conn.initiate_response(
-                            500,
-                            Some("Internal Server Error"),
-                            &[("Content-Type", "text/plain")],
-                        ).await?;
-
-                        conn.write_all(b"Upload failed\n").await?;
-                        return Ok(());
-                    }
-
-                    first_chunk = false;
-                    total_bytes += n;
-                }
-
-                // Auch eine leere Datei erzeugen beziehungsweise leeren.
-                if first_chunk {
-                    let mut fs = self.filesystem.lock().await;
-
-                    if let Err(error) = fs.open(
-                        "Test.bin",
-                        OpenFlags::CREATE
-                            | OpenFlags::WRITE
-                            | OpenFlags::TRUNC,
-                    ) {
-                        error!("Could not create Test.bin: {:?}", error);
-                    }
-                }
-
-                info!("File upload complete: {} bytes", total_bytes);
-
-                conn.initiate_response(
-                    200,
-                    Some("OK"),
-                    &[("Content-Type", "text/plain")],
-                ).await?;
-
-                conn.write_all(b"Upload successful\n").await?;
-            }
-
-            (Method::Get, "/file") => {
-                info!("Sending Test.bin...");
-
-                conn.initiate_response(
-                    200,
-                    Some("OK"),
-                    &[("Content-Type", "application/octet-stream")],
-                ).await?;
-
-                let mut buffer = [0u8; 1024];
-
-                let mut fs = self.filesystem.lock().await;
-
-                match fs.open("Test.bin", OpenFlags::READ) {
-                    Ok(mut file) => {
-                        loop {
-                            let n = match file.read(&mut buffer) {
-                                Ok(n) => n,
-                                Err(error) => {
-                                    error!("File read failed: {:?}", error);
-                                    break;
-                                }
-                            };
-
-                            if n == 0 {
-                                break;
-                            }
-
-                            conn.write_all(&buffer[..n as usize]).await?;
-                        }
-                    }
-
-                    Err(error) => {
-                        error!("Could not open Test.bin: {:?}", error);
-
-                        conn.initiate_response(
-                            404,
-                            Some("Not Found"),
-                            &[("Content-Type", "text/plain")],
-                        ).await?;
-
-                        conn.write_all(b"File not found\n").await?;
-                    }
-                }
-            }
-
-            // =================================================
-            // UNKNOWN ROUTE
-            // =================================================
-            _ => {
-                conn.initiate_response(
-                    404,
-                    Some("Not Found"),
-                    &[
-                        (
-                            "Content-Type",
-                            "text/plain",
-                        ),
-                    ],
-                ).await?;
-
-
-                conn.write_all(b"404 Not Found\n").await?;
-            }
+            (Method::Get, "/") => self.handle_get_root(conn).await,
+            (Method::Get, "/hello") => self.handle_get_hello(conn).await,
+            (Method::Get, "/upload") => self.handle_get_upload(conn).await,
+            (Method::Post, "/upload") => self.handle_post_upload(conn).await,
+            (Method::Get, "/file") => self.handle_get_file(conn).await,
+            (Method::Get, "/assets/base_style.css") => self.handle_get_base_css(conn).await,
+            _ => self.handle_not_found(conn).await,
         }
-
-
-        Ok(())
     }
 }
 
@@ -904,6 +941,7 @@ async fn show_led_sequence(
         Timer::after(led_flash.duration).await;
     }
 }
+
 struct LedFlash {
     r: u8,
     g: u8,
@@ -927,7 +965,7 @@ impl<'d> LittleFsStorage<'d> {
     }
 
     fn address(block: u32, offset: u32) -> u32 {
-        STORAGE_OFFSET + block * STORAGE_BLOCK_SIZE + offset
+        storage_offset() + block * STORAGE_BLOCK_SIZE + offset
     }
 }
 
@@ -939,14 +977,6 @@ impl Storage for LittleFsStorage<'_> {
         buf: &mut [u8],
     ) -> Result<(), littlefs_rust::Error> {
         let address = Self::address(block, offset);
-
-        info!(
-            "LFS READ: block={} offset={} len={} address=0x{:08X}",
-            block,
-            offset,
-            buf.len(),
-            address
-        );
 
         let result = self.flash
             .read_nor(address, buf)
@@ -963,13 +993,6 @@ impl Storage for LittleFsStorage<'_> {
                 littlefs_rust::Error::Io
             });
 
-        info!(
-            "LFS READ DONE: block={} offset={} len={}",
-            block,
-            offset,
-            buf.len()
-        );
-
         result
     }
 
@@ -981,14 +1004,6 @@ impl Storage for LittleFsStorage<'_> {
         data: &[u8],
     ) -> Result<(), littlefs_rust::Error> {
         let address = Self::address(block, offset);
-
-        info!(
-            "LFS WRITE: block={} offset={} len={} address=0x{:08X}",
-            block,
-            offset,
-            data.len(),
-            address
-        );
 
         self.flash
             .write_nor(address, data)
@@ -1004,13 +1019,6 @@ impl Storage for LittleFsStorage<'_> {
                 littlefs_rust::Error::Io
             })?;
 
-        info!(
-            "LFS WRITE DONE: block={} offset={} len={}",
-            block,
-            offset,
-            data.len()
-        );
-
         Ok(())
     }
 
@@ -1019,12 +1027,6 @@ impl Storage for LittleFsStorage<'_> {
         block: u32,
     ) -> Result<(), littlefs_rust::Error> {
         let address = Self::address(block, 0);
-
-        info!(
-            "LFS ERASE: block={} address=0x{:08X}",
-            block,
-            address
-        );
 
         self.flash
             .erase(address, address + STORAGE_BLOCK_SIZE)
@@ -1037,11 +1039,6 @@ impl Storage for LittleFsStorage<'_> {
 
                 littlefs_rust::Error::Io
             })?;
-
-        info!(
-            "LFS ERASE DONE: block={}",
-            block
-        );
 
         Ok(())
     }
@@ -1063,7 +1060,7 @@ fn init_filesystem(
         STORAGE_BLOCK_SIZE,
         STORAGE_BLOCK_COUNT,
     );
-    config.cache_size = 512;
+    config.cache_size = FILE_SYSTEM_CACHE_SIZE;
 
     match Filesystem::mount(storage, config) {
         Ok(filesystem) => {
@@ -1078,7 +1075,7 @@ fn init_filesystem(
                 STORAGE_BLOCK_SIZE,
                 STORAGE_BLOCK_COUNT,
             );
-            format_config.cache_size = 512;
+            format_config.cache_size = FILE_SYSTEM_CACHE_SIZE;
 
             Filesystem::format(
                 &mut storage,
@@ -1104,7 +1101,11 @@ static FILESYSTEM: StaticCell<
 fn log_heap_usage() {
     let used = esp_alloc::HEAP.used();
     let free = esp_alloc::HEAP.free();
-    let total = used + free;
+    let mut total = used + free;
+    
+    if total == 0 {
+        total = 1;
+    }
 
     info!(
         "Heap: used={} B, free={} B, total={} B ({}%)",
@@ -1113,4 +1114,332 @@ fn log_heap_usage() {
         total,
         used * 100 / total
     );
+}
+
+fn log_static_sizes() {
+    info!(
+        "Static sizes: StackResources={} B, TcpBuffers={} B, Filesystem={} B",
+        size_of::<StackResources<4>>(),
+        size_of::<TcpBuffers<1, 512, 512>>(),
+        size_of::<Filesystem<LittleFsStorage<'static>>>(),
+    );
+}
+
+fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
+    return match enum_to_format {
+        DisconnectReason::AccessPointInitiatedDisassociation => "AccessPointInitiatedDisassociation",
+        DisconnectReason::AccessPointTsfReset => "AccessPointTsfReset",
+        DisconnectReason::AkmpInvalid => "AkmpInvalid",
+        DisconnectReason::AlterativeChannelOccupied => "AlterativeChannelOccupied",
+        DisconnectReason::AssociationComebackTimeTooLong => "AssociationComebackTimeTooLong",
+        DisconnectReason::AssociationFailed => "AssociationFailed",
+        DisconnectReason::AssociationLeave => "AssociationLeave",
+        DisconnectReason::AssociationNotAuthenticated => "AssociationNotAuthenticated",
+        DisconnectReason::AssociationTooMany => "AssociationTooMany",
+        DisconnectReason::AuthenticationExpired => "AuthenticationExpired",
+        DisconnectReason::AuthenticationFailed => "AuthenticationFailed",
+        DisconnectReason::AuthenticationLeave => "AuthenticationLeave",
+        DisconnectReason::BadCipherOrAkm => "BadCipherOrAkm",
+        DisconnectReason::BeaconTimeout => "BeaconTimeout",
+        DisconnectReason::BssTransitionDisassociated => "BssTransitionDisassociated",
+        DisconnectReason::CipherSuiteRejected => "CipherSuiteRejected",
+        DisconnectReason::Class2FrameFromNonAuthenticatedStation => "Class2FrameFromNonAuthenticatedStation",
+        DisconnectReason::Class3FrameFromNonAssociatedStation => "Class3FrameFromNonAssociatedStation",
+        DisconnectReason::ConnectionFailed => "ConnectionFailed",
+        DisconnectReason::DisassociatedDueToInactivity => "DisassociatedDueToInactivity",
+        DisconnectReason::DisassociatedPowerCapabilityBad => "DisassociatedPowerCapabilityBad",
+        DisconnectReason::DisassociatedUnsupportedChannel => "DisassociatedUnsupportedChannel",
+        DisconnectReason::EndBlockAck => "EndBlockAck",
+        DisconnectReason::ExceededTxOp => "ExceededTxOp",
+        DisconnectReason::FourWayHandshakeTimeout => "FourWayHandshakeTimeout",
+        DisconnectReason::GroupCipherInvalid => "GroupCipherInvalid",
+        DisconnectReason::GroupKeyUpdateTimeout => "GroupKeyUpdateTimeout",
+        DisconnectReason::IeIn4wayDiffers => "IeIn4wayDiffers",
+        DisconnectReason::IeInvalid => "IeInvalid",
+        DisconnectReason::InvalidFtActionFrameCount => "InvalidFtActionFrameCount",
+        DisconnectReason::InvalidFte => "InvalidFte",
+        DisconnectReason::InvalidMde => "InvalidMde",
+        DisconnectReason::InvalidPmkid => "InvalidPmkid",
+        DisconnectReason::InvalidRsnIeCapabilities => "InvalidRsnIeCapabilities",
+        DisconnectReason::MicFailure => "MicFailure",
+        DisconnectReason::MissingAcks => "MissingAcks",
+        DisconnectReason::NoAccessPointFound => "NoAccessPointFound",
+        DisconnectReason::NoAccessPointFoundInAuthmodeThreshold => "NoAccessPointFoundInAuthmodeThreshold",
+        DisconnectReason::NoAccessPointFoundInRssiThreshold => "NoAccessPointFoundInRssiThreshold",
+        DisconnectReason::NoAccessPointFoundWithCompatibleSecurity => "NoAccessPointFoundWithCompatibleSecurity",
+        DisconnectReason::NoSspRoamingAgreement => "NoSspRoamingAgreement",
+        DisconnectReason::NotAuthorizedThisLocation => "NotAuthorizedThisLocation",
+        DisconnectReason::NotEnoughBandwidth => "NotEnoughBandwidth",
+        DisconnectReason::PairwiseCipherInvalid => "PairwiseCipherInvalid",
+        DisconnectReason::PeerInitiated => "PeerInitiated",
+        DisconnectReason::SaQueryTimeout => "SaQueryTimeout",
+        DisconnectReason::ServiceChangePercludesTs => "ServiceChangePercludesTs",
+        DisconnectReason::SspRequestedDisassociation => "SspRequestedDisassociation",
+        DisconnectReason::StationLeaving => "StationLeaving",
+        DisconnectReason::TdlsPeerUnreachable => "TdlsPeerUnreachable",
+        DisconnectReason::TdlsUnspecified => "TdlsUnspecified",
+        DisconnectReason::TransmissionLinkEstablishmentFailed => "TransmissionLinkEstablishmentFailed",
+        DisconnectReason::UnknownBlockAck => "UnknownBlockAck",
+        DisconnectReason::UnspecifiedQos => "UnspecifiedQos",
+        DisconnectReason::UnsupportedRsnIeVersion => "UnsupportedRsnIeVersion",
+        DisconnectReason::_802_1xAuthenticationFailed => "_802_1xAuthenticationFailed",
+        _ => "Unknown"
+    }
+}
+
+// fn to_string(enum_to_format: esp_radio::wifi::sta::DisconnectReason) -> &'static str{
+//     return match enum_to_format {
+//         DisconnectReason::AccessPointInitiatedDisassociation => "AccessPointInitiatedDisassociation",
+//         DisconnectReason::AccessPointTsfReset => "AccessPointTsfReset",
+//         DisconnectReason::AkmpInvalid => "AkmpInvalid",
+//         DisconnectReason::AlterativeChannelOccupied => "AlterativeChannelOccupied",
+//         DisconnectReason::AssociationComebackTimeTooLong => "AssociationComebackTimeTooLong",
+//         DisconnectReason::AssociationFailed => "AssociationFailed",
+//         DisconnectReason::AssociationLeave => "AssociationLeave",
+//         DisconnectReason::AssociationNotAuthenticated => "AssociationNotAuthenticated",
+//         DisconnectReason::AssociationTooMany => "AssociationTooMany",
+//         DisconnectReason::AuthenticationExpired => "AuthenticationExpired",
+//         DisconnectReason::AuthenticationFailed => "AuthenticationFailed",
+//         DisconnectReason::AuthenticationLeave => "AuthenticationLeave",
+//         DisconnectReason::BadCipherOrAkm => "BadCipherOrAkm",
+//         DisconnectReason::BeaconTimeout => "BeaconTimeout",
+//         DisconnectReason::BssTransitionDisassociated => "BssTransitionDisassociated",
+//         DisconnectReason::CipherSuiteRejected => "CipherSuiteRejected",
+//         DisconnectReason::Class2FrameFromNonAuthenticatedStation => "Class2FrameFromNonAuthenticatedStation",
+//         DisconnectReason::Class3FrameFromNonAssociatedStation => "Class3FrameFromNonAssociatedStation",
+//         DisconnectReason::ConnectionFailed => "ConnectionFailed",
+//         DisconnectReason::DisassociatedDueToInactivity => "DisassociatedDueToInactivity",
+//         DisconnectReason::DisassociatedPowerCapabilityBad => "DisassociatedPowerCapabilityBad",
+//         DisconnectReason::DisassociatedUnsupportedChannel => "DisassociatedUnsupportedChannel",
+//         DisconnectReason::EndBlockAck => "EndBlockAck",
+//         DisconnectReason::ExceededTxOp => "ExceededTxOp",
+//         DisconnectReason::FourWayHandshakeTimeout => "FourWayHandshakeTimeout",
+//         DisconnectReason::GroupCipherInvalid => "GroupCipherInvalid",
+//         DisconnectReason::GroupKeyUpdateTimeout => "GroupKeyUpdateTimeout",
+//         DisconnectReason::IeIn4wayDiffers => "IeIn4wayDiffers",
+//         DisconnectReason::IeInvalid => "IeInvalid",
+//         DisconnectReason::InvalidFtActionFrameCount => "InvalidFtActionFrameCount",
+//         DisconnectReason::InvalidFte => "InvalidFte",
+//         DisconnectReason::InvalidMde => "InvalidMde",
+//         DisconnectReason::InvalidPmkid => "InvalidPmkid",
+//         DisconnectReason::InvalidRsnIeCapabilities => "InvalidRsnIeCapabilities",
+//         DisconnectReason::MicFailure => "MicFailure",
+//         DisconnectReason::MissingAcks => "MissingAcks",
+//         DisconnectReason::NoAccessPointFound => "NoAccessPointFound",
+//         DisconnectReason::NoAccessPointFoundInAuthmodeThreshold => "NoAccessPointFoundInAuthmodeThreshold",
+//         DisconnectReason::NoAccessPointFoundInRssiThreshold => "NoAccessPointFoundInRssiThreshold",
+//         InvalidRsnIeCapabilities => "InvalidRsnIeCapabilities",
+//         DisconnectReason::NoAccessPointFoundWithCompatibleSecurity => "NoAccessPointFoundWithCompatibleSecurity",
+//         DisconnectReason::NoSspRoamingAgreement => "NoSspRoamingAgreement",
+//         DisconnectReason::NotAuthorizedThisLocation => "NotAuthorizedThisLocation",
+//         DisconnectReason::NotEnoughBandwidth => "NotEnoughBandwidth",
+//         DisconnectReason::PairwiseCipherInvalid => "PairwiseCipherInvalid",
+//         DisconnectReason::PeerInitiated => "PeerInitiated",
+//         DisconnectReason::SaQueryTimeout => "SaQueryTimeout",
+//         DisconnectReason::ServiceChangePercludesTs => "ServiceChangePercludesTs",
+//         DisconnectReason::SspRequestedDisassociation => "SspRequestedDisassociation",
+//         DisconnectReason::StationLeaving => "StationLeaving",
+//         DisconnectReason::TdlsPeerUnreachable => "TdlsPeerUnreachable",
+//         DisconnectReason::TdlsUnspecified => "TdlsUnspecified",
+//         DisconnectReason::TransmissionLinkEstablishmentFailed => "TransmissionLinkEstablishmentFailed",
+//         DisconnectReason::UnknownBlockAck => "UnknownBlockAck",
+//         DisconnectReason::UnspecifiedQos => "UnspecifiedQos",
+//         DisconnectReason::UnsupportedRsnIeVersion => "UnsupportedRsnIeVersion",
+//         DisconnectReason::_802_1xAuthenticationFailed => "_802_1xAuthenticationFailed",
+//         _ => "Unknown"
+//     }
+// }
+
+
+
+// C ======================
+
+const VL53L8CX_I2C_ADDRESS: u8 = 0x29;
+const VL53L8CX_RESOLUTION_8X8: usize = 64;
+const VL53L8CX_TEMPORARY_BUFFER_SIZE: usize = 1024;
+const VL53L8CX_OFFSET_BUFFER_SIZE: usize = 488;
+const VL53L8CX_XTALK_BUFFER_SIZE: usize = 776;
+
+type Vl53Write = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
+type Vl53Read = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
+type Vl53Wait = extern "C" fn(*mut c_void, u32) -> u8;
+
+#[repr(C)]
+struct Vl53l8cxPlatform {
+    address: u16,
+    write: Vl53Write,
+    read: Vl53Read,
+    wait: Vl53Wait,
+    handle: *mut c_void,
+}
+
+#[repr(C)]
+struct Vl53l8cxConfiguration {
+    platform: Vl53l8cxPlatform,
+    streamcount: u8,
+    data_read_size: u32,
+    default_configuration: *mut u8,
+    default_xtalk: *mut u8,
+    offset_data: [u8; VL53L8CX_OFFSET_BUFFER_SIZE],
+    xtalk_data: [u8; VL53L8CX_XTALK_BUFFER_SIZE],
+    temp_buffer: [u8; VL53L8CX_TEMPORARY_BUFFER_SIZE],
+    is_auto_stop_enabled: u8,
+}
+
+#[repr(C)]
+struct Vl53l8cxMotionIndicator {
+    global_indicator_1: u32,
+    global_indicator_2: u32,
+    status: u8,
+    nb_of_detected_aggregates: u8,
+    nb_of_aggregates: u8,
+    spare: u8,
+    motion: [u32; 32],
+}
+
+#[repr(C)]
+struct Vl53l8cxResultsData {
+    silicon_temp_degc: i8,
+    ambient_per_spad: [u32; VL53L8CX_RESOLUTION_8X8],
+    nb_target_detected: [u8; VL53L8CX_RESOLUTION_8X8],
+    nb_spads_enabled: [u32; VL53L8CX_RESOLUTION_8X8],
+    signal_per_spad: [u32; VL53L8CX_RESOLUTION_8X8],
+    range_sigma_mm: [u16; VL53L8CX_RESOLUTION_8X8],
+    distance_mm: [i16; VL53L8CX_RESOLUTION_8X8],
+    reflectance: [u8; VL53L8CX_RESOLUTION_8X8],
+    target_status: [u8; VL53L8CX_RESOLUTION_8X8],
+    motion_indicator: Vl53l8cxMotionIndicator,
+}
+
+unsafe extern "C" {
+    fn vl53l8cx_init(device: *mut Vl53l8cxConfiguration) -> u8;
+    fn vl53l8cx_start_ranging(device: *mut Vl53l8cxConfiguration) -> u8;
+    fn vl53l8cx_check_data_ready(
+        device: *mut Vl53l8cxConfiguration,
+        ready: *mut u8,
+    ) -> u8;
+    fn vl53l8cx_get_ranging_data(
+        device: *mut Vl53l8cxConfiguration,
+        results: *mut Vl53l8cxResultsData,
+    ) -> u8;
+}
+
+extern "C" fn vl53_i2c_write(
+    handle: *mut c_void,
+    register_address: u16,
+    values: *mut u8,
+    size: u32,
+) -> u8 {
+    let i2c = unsafe { &mut *(handle as *mut I2c<'static, Blocking>) };
+    let values = unsafe { core::slice::from_raw_parts(values, size as usize) };
+    let mut offset = 0;
+
+    while offset < values.len() {
+        let chunk_len = core::cmp::min(values.len() - offset, 256);
+        let mut buffer = [0u8; 258];
+        let address = register_address.wrapping_add(offset as u16);
+        buffer[0] = (address >> 8) as u8;
+        buffer[1] = address as u8;
+        buffer[2..2 + chunk_len].copy_from_slice(&values[offset..offset + chunk_len]);
+
+        if i2c.write(VL53L8CX_I2C_ADDRESS, &buffer[..2 + chunk_len]).is_err() {
+            return 1;
+        }
+        offset += chunk_len;
+    }
+
+    0
+}
+
+extern "C" fn vl53_i2c_read(
+    handle: *mut c_void,
+    register_address: u16,
+    values: *mut u8,
+    size: u32,
+) -> u8 {
+    let i2c = unsafe { &mut *(handle as *mut I2c<'static, Blocking>) };
+    let values = unsafe { core::slice::from_raw_parts_mut(values, size as usize) };
+    let mut offset = 0;
+
+    while offset < values.len() {
+        let chunk_len = core::cmp::min(values.len() - offset, 256);
+        let address = register_address.wrapping_add(offset as u16);
+        let address_bytes = [(address >> 8) as u8, address as u8];
+
+        if i2c.write_read(
+            VL53L8CX_I2C_ADDRESS,
+            &address_bytes,
+            &mut values[offset..offset + chunk_len],
+        ).is_err() {
+            return 1;
+        }
+        offset += chunk_len;
+    }
+
+    0
+}
+
+extern "C" fn vl53_wait(_handle: *mut c_void, milliseconds: u32) -> u8 {
+    esp_hal::delay::Delay::new().delay_millis(milliseconds);
+    0
+}
+
+#[embassy_executor::task]
+async fn sensor_task(mut i2c: I2c<'static, Blocking>) {
+    let platform = Vl53l8cxPlatform {
+        address: 0x52,
+        write: vl53_i2c_write,
+        read: vl53_i2c_read,
+        wait: vl53_wait,
+        handle: (&mut i2c as *mut I2c<'static, Blocking>).cast(),
+    };
+
+    let mut device_storage = core::mem::MaybeUninit::<Vl53l8cxConfiguration>::uninit();
+    let device_ptr = device_storage.as_mut_ptr();
+    unsafe {
+        core::ptr::addr_of_mut!((*device_ptr).platform).write(platform);
+    }
+
+    let init_status = unsafe { vl53l8cx_init(device_ptr) };
+    if init_status != 0 {
+        error!("VL53L8CX init failed: {}", init_status);
+        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
+        return;
+    }
+
+    let mut device = unsafe { device_storage.assume_init() };
+
+    let start_status = unsafe { vl53l8cx_start_ranging(&mut device) };
+    if start_status != 0 {
+        error!("VL53L8CX start failed: {}", start_status);
+        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
+        return;
+    }
+
+    info!("VL53L8CX ranging started");
+    let mut results: Vl53l8cxResultsData = unsafe { core::mem::zeroed() };
+
+    loop {
+        let mut ready = 0;
+        let ready_status = unsafe { vl53l8cx_check_data_ready(&mut device, &mut ready) };
+
+        if ready_status != 0 {
+            error!("VL53L8CX ready check failed: {}", ready_status);
+        } else if ready != 0 {
+            let data_status = unsafe {
+                vl53l8cx_get_ranging_data(&mut device, &mut results)
+            };
+            if data_status == 0 {
+                info!(
+                    "VL53L8CX distance: {} mm, status: {}",
+                    results.distance_mm[0],
+                    results.target_status[0],
+                );
+            } else {
+                error!("VL53L8CX data read failed: {}", data_status);
+            }
+        }
+
+        Timer::after(Duration::from_millis(20)).await;
+    }
 }
