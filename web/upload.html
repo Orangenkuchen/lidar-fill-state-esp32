@@ -2,6 +2,10 @@
 <html lang="de">
 <head>
     <meta charset="utf-8">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Ubuntu&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/base_style.css">
     <title>Datei hochladen</title>
 </head>
 <body>
@@ -11,6 +15,10 @@
     <button onclick="upload()">Hochladen</button>
 
     <p id="status"></p>
+
+    <a href="./file">
+        <button>Download</button>
+    </a>
 
     <script>
         async function upload() {
@@ -29,7 +37,7 @@
                 headers: {
                     "Content-Type": "application/octet-stream"
                 },
-                body: input.files[0]
+                body: input.files[0],
             });
 
             status.textContent = await response.text();
