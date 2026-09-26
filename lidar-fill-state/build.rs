@@ -12,6 +12,8 @@ const WIFI_FILE_PATH: &str = "wifi.env";
 const PARTITION_TABLE_FILE_PATH: &str = "partition-table.csv";
 
 fn main() {
+    linker_be_nice();
+
     cc::Build::new()
         .compiler("riscv32-esp-elf-gcc")
         .files([
@@ -28,7 +30,6 @@ fn main() {
 
     load_wifi_credentials();
     load_storage_indexes_from_partition_table();
-    linker_be_nice();
 }
 
 /// Loads the wifi-config from the file.

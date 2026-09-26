@@ -36,7 +36,8 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
 use esp_hal::{
     clock::CpuClock,
-    gpio::Level,
+    delay::Delay,
+    gpio::{Level, Output, OutputConfig},
     peripherals::{
         WIFI
     }, 
@@ -150,6 +151,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
     let esp_hal::peripherals::Peripherals {
         GPIO8,
+        GPIO1,
         WIFI,
         RMT,
         TIMG0,
@@ -207,20 +209,31 @@ async fn main(spawner: Spawner) -> ! {
     trace!("Setting up the network and wifi components...");
     let network_components = setup_network(WIFI);
 
-    // let i2c = I2c::new(
-    //     peripherals.I2C0,
-    //     esp_hal::i2c::master::Config::default()
-    //         .with_frequency(esp_hal::time::Rate::from_khz(400)),
-    // )
-    // .unwrap()
-    // .with_sda(peripherals.GPIO6)
-    // .with_scl(peripherals.GPIO7);
+    // Reset the sensor's I2C interface and select I2C mode.
+    let mut sensor_i2c_mode = Output::new(
+        GPIO1,
+        Level::High,
+        OutputConfig::default(),
+    );
+    let delay = Delay::new();
+    delay.delay_millis(1);
+    sensor_i2c_mode.set_low();
+    delay.delay_millis(1);
 
-    // debug!("Spawning VL53L8CX sensor task...");
-    // spawner.spawn(
-    //     sensor_task(i2c)
-    //         .expect("failed to spawn sensor task")
-    // );
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        esp_hal::i2c::master::Config::default()
+            .with_frequency(esp_hal::time::Rate::from_khz(100)),
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO6)
+    .with_scl(peripherals.GPIO7);
+
+    debug!("Spawning VL53L8CX sensor task...");
+    spawner.spawn(
+        sensor_task(i2c)
+            .expect("failed to spawn sensor task")
+    );
 
     // START NETWORK TASK
     //
@@ -1255,8 +1268,9 @@ fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
 // C ======================
 
 const VL53L8CX_I2C_ADDRESS: u8 = 0x29;
-const VL53L8CX_RESOLUTION_8X8: usize = 64;
-const VL53L8CX_TEMPORARY_BUFFER_SIZE: usize = 1024;
+const VL53L8CX_RESOLUTION_8X8: u8 = 64;
+const VL53L8CX_RESOLUTION_8X8_VALUES: usize = 64;
+const VL53L8CX_TEMPORARY_BUFFER_SIZE: usize = 1452;
 const VL53L8CX_OFFSET_BUFFER_SIZE: usize = 488;
 const VL53L8CX_XTALK_BUFFER_SIZE: usize = 776;
 
@@ -1300,19 +1314,24 @@ struct Vl53l8cxMotionIndicator {
 #[repr(C)]
 struct Vl53l8cxResultsData {
     silicon_temp_degc: i8,
-    ambient_per_spad: [u32; VL53L8CX_RESOLUTION_8X8],
-    nb_target_detected: [u8; VL53L8CX_RESOLUTION_8X8],
-    nb_spads_enabled: [u32; VL53L8CX_RESOLUTION_8X8],
-    signal_per_spad: [u32; VL53L8CX_RESOLUTION_8X8],
-    range_sigma_mm: [u16; VL53L8CX_RESOLUTION_8X8],
-    distance_mm: [i16; VL53L8CX_RESOLUTION_8X8],
-    reflectance: [u8; VL53L8CX_RESOLUTION_8X8],
-    target_status: [u8; VL53L8CX_RESOLUTION_8X8],
+    ambient_per_spad: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
+    nb_target_detected: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
+    nb_spads_enabled: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
+    signal_per_spad: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
+    range_sigma_mm: [u16; VL53L8CX_RESOLUTION_8X8_VALUES],
+    distance_mm: [i16; VL53L8CX_RESOLUTION_8X8_VALUES],
+    reflectance: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
+    target_status: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
     motion_indicator: Vl53l8cxMotionIndicator,
 }
 
+#[link(name = "vl53l8cx", kind = "static")]
 unsafe extern "C" {
     fn vl53l8cx_init(device: *mut Vl53l8cxConfiguration) -> u8;
+    fn vl53l8cx_set_resolution(
+        device: *mut Vl53l8cxConfiguration,
+        resolution: u8,
+    ) -> u8;
     fn vl53l8cx_start_ranging(device: *mut Vl53l8cxConfiguration) -> u8;
     fn vl53l8cx_check_data_ready(
         device: *mut Vl53l8cxConfiguration,
@@ -1335,14 +1354,23 @@ extern "C" fn vl53_i2c_write(
     let mut offset = 0;
 
     while offset < values.len() {
-        let chunk_len = core::cmp::min(values.len() - offset, 256);
+        let chunk_len = core::cmp::min(values.len() - offset, 32);
         let mut buffer = [0u8; 258];
         let address = register_address.wrapping_add(offset as u16);
         buffer[0] = (address >> 8) as u8;
         buffer[1] = address as u8;
         buffer[2..2 + chunk_len].copy_from_slice(&values[offset..offset + chunk_len]);
 
-        if i2c.write(VL53L8CX_I2C_ADDRESS, &buffer[..2 + chunk_len]).is_err() {
+        if let Err(error) = i2c.write(
+            VL53L8CX_I2C_ADDRESS,
+            &buffer[..2 + chunk_len],
+        ) {
+            error!(
+                "VL53L8CX I2C write failed: register=0x{:04X} size={} error={:?}",
+                address,
+                chunk_len,
+                error,
+            );
             return 1;
         }
         offset += chunk_len;
@@ -1362,15 +1390,21 @@ extern "C" fn vl53_i2c_read(
     let mut offset = 0;
 
     while offset < values.len() {
-        let chunk_len = core::cmp::min(values.len() - offset, 256);
+        let chunk_len = core::cmp::min(values.len() - offset, 32);
         let address = register_address.wrapping_add(offset as u16);
         let address_bytes = [(address >> 8) as u8, address as u8];
 
-        if i2c.write_read(
+        if let Err(error) = i2c.write_read(
             VL53L8CX_I2C_ADDRESS,
             &address_bytes,
             &mut values[offset..offset + chunk_len],
-        ).is_err() {
+        ) {
+            error!(
+                "VL53L8CX I2C read failed: register=0x{:04X} size={} error={:?}",
+                address,
+                chunk_len,
+                error,
+            );
             return 1;
         }
         offset += chunk_len;
@@ -1409,6 +1443,15 @@ async fn sensor_task(mut i2c: I2c<'static, Blocking>) {
 
     let mut device = unsafe { device_storage.assume_init() };
 
+    let resolution_status = unsafe {
+        vl53l8cx_set_resolution(&mut device, VL53L8CX_RESOLUTION_8X8)
+    };
+    if resolution_status != 0 {
+        error!("VL53L8CX set 8x8 resolution failed: {}", resolution_status);
+        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
+        return;
+    }
+
     let start_status = unsafe { vl53l8cx_start_ranging(&mut device) };
     if start_status != 0 {
         error!("VL53L8CX start failed: {}", start_status);
@@ -1431,9 +1474,99 @@ async fn sensor_task(mut i2c: I2c<'static, Blocking>) {
             };
             if data_status == 0 {
                 info!(
-                    "VL53L8CX distance: {} mm, status: {}",
+                    "VL53L8CX distance: {} mm, status: {}, temperature: {}, ({})",
                     results.distance_mm[0],
                     results.target_status[0],
+                    results.silicon_temp_degc,
+                    results.distance_mm.len()
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[0]),
+                    left_pad(results.distance_mm[1]),
+                    left_pad(results.distance_mm[2]),
+                    left_pad(results.distance_mm[3]),
+                    left_pad(results.distance_mm[4]),
+                    left_pad(results.distance_mm[5]),
+                    left_pad(results.distance_mm[6]),
+                    left_pad(results.distance_mm[7])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[8]),
+                    left_pad(results.distance_mm[9]),
+                    left_pad(results.distance_mm[10]),
+                    left_pad(results.distance_mm[11]),
+                    left_pad(results.distance_mm[12]),
+                    left_pad(results.distance_mm[13]),
+                    left_pad(results.distance_mm[14]),
+                    left_pad(results.distance_mm[15])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[16]),
+                    left_pad(results.distance_mm[17]),
+                    left_pad(results.distance_mm[18]),
+                    left_pad(results.distance_mm[19]),
+                    left_pad(results.distance_mm[20]),
+                    left_pad(results.distance_mm[21]),
+                    left_pad(results.distance_mm[22]),
+                    left_pad(results.distance_mm[23])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[24]),
+                    left_pad(results.distance_mm[25]),
+                    left_pad(results.distance_mm[26]),
+                    left_pad(results.distance_mm[27]),
+                    left_pad(results.distance_mm[28]),
+                    left_pad(results.distance_mm[29]),
+                    left_pad(results.distance_mm[30]),
+                    left_pad(results.distance_mm[31])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[32]),
+                    left_pad(results.distance_mm[33]),
+                    left_pad(results.distance_mm[34]),
+                    left_pad(results.distance_mm[35]),
+                    left_pad(results.distance_mm[36]),
+                    left_pad(results.distance_mm[37]),
+                    left_pad(results.distance_mm[38]),
+                    left_pad(results.distance_mm[39])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[40]),
+                    left_pad(results.distance_mm[41]),
+                    left_pad(results.distance_mm[42]),
+                    left_pad(results.distance_mm[43]),
+                    left_pad(results.distance_mm[44]),
+                    left_pad(results.distance_mm[45]),
+                    left_pad(results.distance_mm[46]),
+                    left_pad(results.distance_mm[47])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[48]),
+                    left_pad(results.distance_mm[49]),
+                    left_pad(results.distance_mm[50]),
+                    left_pad(results.distance_mm[51]),
+                    left_pad(results.distance_mm[52]),
+                    left_pad(results.distance_mm[53]),
+                    left_pad(results.distance_mm[54]),
+                    left_pad(results.distance_mm[55])
+                );
+                info!(
+                    "{} {} {} {} {} {} {} {}",
+                    left_pad(results.distance_mm[56]),
+                    left_pad(results.distance_mm[57]),
+                    left_pad(results.distance_mm[58]),
+                    left_pad(results.distance_mm[59]),
+                    left_pad(results.distance_mm[60]),
+                    left_pad(results.distance_mm[61]),
+                    left_pad(results.distance_mm[62]),
+                    left_pad(results.distance_mm[63])
                 );
             } else {
                 error!("VL53L8CX data read failed: {}", data_status);
@@ -1442,4 +1575,21 @@ async fn sensor_task(mut i2c: I2c<'static, Blocking>) {
 
         Timer::after(Duration::from_millis(20)).await;
     }
+}
+
+fn left_pad(number: i16) -> heapless::String<24> {
+    let color = match number {
+        ..=49 => "\x1b[38;5;196m",       // red
+        50..=99 => "\x1b[38;5;208m",     // orange
+        100..=199 => "\x1b[38;5;226m",   // yellow
+        200..=399 => "\x1b[38;5;46m",    // green
+        400..=799 => "\x1b[38;5;51m",    // cyan
+        800..=1599 => "\x1b[38;5;21m",   // blue
+        1600..=3900 => "\x1b[38;5;129m", // violet-blue
+        _ => "\x1b[38;5;129m",            // violet
+    };
+
+    let mut padded = heapless::String::<24>::new();
+    write!(padded, "{}{:04}\x1b[0m", color, number).unwrap();
+    padded
 }

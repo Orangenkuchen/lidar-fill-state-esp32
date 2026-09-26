@@ -89,3 +89,6 @@ opt-level = "s"
 
 [profile.dev.package.esp-storage]
 opt-level = 3
+
+[build-dependencies]
+cc = "1"
