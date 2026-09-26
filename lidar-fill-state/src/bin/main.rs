@@ -4,19 +4,16 @@
 // The entrypoint is provided by #[esp_rtos::main].
 #![no_main]
 
-use core::fmt::{Debug, Display, Write as FmtWrite};
+use core::fmt::{Write as FmtWrite};
 use core::ffi::c_void;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU8, Ordering};
 use edge_http::{
     io::{
         server::{
-            Connection,
-            DefaultServer,
-            Handler,
+            DefaultServer
         }
-    },
-    Method,
+    }
 };
 use edge_nal::TcpBind;
 use edge_nal_embassy::{
@@ -24,6 +21,8 @@ use edge_nal_embassy::{
     TcpBuffers,
 };
 use esp_radio::wifi::DisconnectReason;
+use lidar_fill_state::modules::http_handler::HttpHandler;
+use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
 use log::{debug, error, info, warn, trace};
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -33,7 +32,6 @@ use embassy_net::{
     StackResources,
 };
 use embassy_time::{Duration, Timer};
-use embedded_io_async::{Read, Write};
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
@@ -66,7 +64,7 @@ use esp_radio::wifi::{
 };
 use static_cell::StaticCell;
 use littlefs_rust::{
-    Config, Filesystem, OpenFlags, Storage,
+    Config, Filesystem
 };
 use esp_storage::FlashStorage;
 use embassy_sync::{
@@ -82,30 +80,19 @@ enum SystemState {
     WifiError = 2,
     SensorError = 3,
 }
-/// The index where the storage partition starts
-fn storage_offset() -> u32 {
-    u32::from_str_radix(
-        env!("STORAGE_PARTITION_START_INDEX").trim_start_matches("0x"),
-        16,
-    )
-    .unwrap()
-}
+
 /// The size of a storage block
 const STORAGE_BLOCK_SIZE: u32 = 4 * 1_024;
 /// The amount of blocks in the storage
 const STORAGE_BLOCK_COUNT: u32 = 528;
+/// The start index of the storage partition
+const STORAGE_PARTITION_START_INDEX: &str = env!("STORAGE_PARTITION_START_INDEX");
 /// The size of the cache for the file system
 const FILE_SYSTEM_CACHE_SIZE: u32 = 4 * 1_024;
 /// The ssid of the wlan to connect to
 const WIFI_SSID: &str = env!("WIFI_SSID");
 /// The wifi password to use
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
-/// The html of the index page of the webserver
-const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
-/// The html of the upload page of the webserver
-const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
-/// The base css of the web pages of the webserver
-const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/base_style.css");
 
 /// The state of the system
 /// 
@@ -193,7 +180,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Configure RMT channel 0 as a transmitter and route its output to GPIO8.
     // RGB LED is connected to GPIO8.
-    let mut channel = rmt
+    let channel = rmt
         .channel0
         .configure_tx(&tx_config)
         .unwrap()
@@ -555,250 +542,7 @@ async fn web_server_task(
 // HTTP HANDLER
 // ============================================================
 
-struct HttpHandler {
-    filesystem: &'static Mutex<
-        NoopRawMutex,
-        Filesystem<LittleFsStorage<'static>>,
-    >,
-}
 
-impl HttpHandler {
-    async fn handle_get_root<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/html; charset=utf-8")],
-        ).await?;
-
-        conn.write_all(HTTP_INDEX_HTML.as_bytes()).await?;
-        Ok(())
-    }
-
-    async fn handle_get_hello<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/plain")],
-        ).await?;
-
-        conn.write_all(b"Hello from the ESP32-C6!\n").await?;
-        Ok(())
-    }
-
-    async fn handle_get_upload<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/html; charset=utf-8")],
-        ).await?;
-
-        conn.write_all(HTTP_UPLOAD_HTML.as_bytes()).await?;
-        Ok(())
-    }
-
-    async fn handle_post_upload<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        info!("Receiving file upload...");
-
-        let mut buffer = [0u8; 8192];
-        let mut total_bytes = 0usize;
-
-        let fs = self.filesystem.lock().await;
-        let file = match fs.open(
-            "Test.bin",
-            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNC,
-        ) {
-            Ok(file) => file,
-            Err(error) => {
-                error!("Could not open Test.bin: {:?}", error);
-                conn.initiate_response(
-                    500,
-                    Some("Internal Server Error"),
-                    &[("Content-Type", "text/plain")],
-                ).await?;
-                conn.write_all(b"Upload failed\n").await?;
-                return Ok(());
-            }
-        };
-
-        loop {
-            let n = conn.read(&mut buffer).await?;
-
-            if n == 0 {
-                break;
-            }
-
-            if let Err(error) = file.write(&buffer[..n]) {
-                error!("File write failed: {:?}", error);
-                conn.initiate_response(
-                    500,
-                    Some("Internal Server Error"),
-                    &[("Content-Type", "text/plain")],
-                ).await?;
-                conn.write_all(b"Upload failed\n").await?;
-                return Ok(());
-            }
-
-            total_bytes += n;
-        }
-
-        info!("File upload complete: {} bytes", total_bytes);
-
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/plain")],
-        ).await?;
-
-        conn.write_all(b"Upload successful\n").await?;
-        Ok(())
-    }
-
-    async fn handle_get_file<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        info!("Sending Test.bin...");
-
-        let mut buffer = [0u8; 1024];
-
-        let mut fs = self.filesystem.lock().await;
-
-        let mut file = match fs.open("Test.bin", OpenFlags::READ) {
-            Ok(file) => file,
-            Err(error) => {
-                error!("Could not open Test.bin: {:?}", error);
-                conn.initiate_response(
-                    404,
-                    Some("Not Found"),
-                    &[("Content-Type", "text/plain")],
-                ).await?;
-                conn.write_all(b"File not found\n").await?;
-                return Ok(());
-            }
-        };
-
-        let mut content_length = heapless::String::<10>::new();
-        write!(content_length, "{}", file.size()).unwrap();
-
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[
-                ("Content-Type", "application/octet-stream"),
-                ("Content-Length", content_length.as_str()),
-                ("Content-Disposition", "attachment; filename=\"Test.bin\"")
-            ],
-        ).await?;
-
-        loop {
-            let n = match file.read(&mut buffer) {
-                Ok(n) => n,
-                Err(error) => {
-                    error!("File read failed: {:?}", error);
-                    return Ok(());
-                }
-            };
-
-            if n == 0 {
-                return Ok(());
-            }
-
-            conn.write_all(&buffer[..n as usize]).await?;
-        }
-    }
-
-    /// Returns the base_style.css
-    async fn handle_get_base_css<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/css")],
-        ).await?;
-
-        conn.write_all(HTTP_BASE_STYLE_CSS.as_bytes()).await?;
-        Ok(())
-    }
-
-    async fn handle_not_found<T, const N: usize>(
-        &self,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), edge_http::io::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        conn.initiate_response(
-            404,
-            Some("Not Found"),
-            &[("Content-Type", "text/plain")],
-        ).await?;
-
-        conn.write_all(b"404 Not Found\n").await?;
-        Ok(())
-    }
-}
-
-impl Handler for HttpHandler {
-    type Error<E>
-        = edge_http::io::Error<E>
-    where
-        E: Debug;
-
-    async fn handle<T, const N: usize>(
-        &self,
-        _task_id: impl Display + Copy,
-        conn: &mut Connection<'_, T, N>,
-    ) -> Result<(), Self::Error<T::Error>>
-    where
-        T: Read + Write,
-    {
-        let headers = conn.headers()?;
-
-        trace!("Received web request: {:?} {}", headers.method, headers.path);
-
-        match (headers.method, headers.path) {
-            (Method::Get, "/") => self.handle_get_root(conn).await,
-            (Method::Get, "/hello") => self.handle_get_hello(conn).await,
-            (Method::Get, "/upload") => self.handle_get_upload(conn).await,
-            (Method::Post, "/upload") => self.handle_post_upload(conn).await,
-            (Method::Get, "/file") => self.handle_get_file(conn).await,
-            (Method::Get, "/assets/base_style.css") => self.handle_get_base_css(conn).await,
-            _ => self.handle_not_found(conn).await,
-        }
-    }
-}
 
 /// Generates the RMT data for a WS2812.
 ///
@@ -968,105 +712,19 @@ struct NetworkComponents<'a> {
     stack: Stack<'a>
 }
 
-pub struct LittleFsStorage<'d> {
-    flash: FlashStorage<'d>,
-}
-
-impl<'d> LittleFsStorage<'d> {
-    pub fn new(flash: FlashStorage<'d>) -> Self {
-        Self { flash }
-    }
-
-    fn address(block: u32, offset: u32) -> u32 {
-        storage_offset() + block * STORAGE_BLOCK_SIZE + offset
-    }
-}
-
-impl Storage for LittleFsStorage<'_> {
-    fn read(
-        &mut self,
-        block: u32,
-        offset: u32,
-        buf: &mut [u8],
-    ) -> Result<(), littlefs_rust::Error> {
-        let address = Self::address(block, offset);
-
-        let result = self.flash
-            .read_nor(address, buf)
-            .map_err(|e| {
-                error!(
-                    "LFS READ FAILED: block={} offset={} len={} address=0x{:08X} error={:?}",
-                    block,
-                    offset,
-                    buf.len(),
-                    address,
-                    e
-                );
-
-                littlefs_rust::Error::Io
-            });
-
-        result
-    }
-
-
-    fn write(
-        &mut self,
-        block: u32,
-        offset: u32,
-        data: &[u8],
-    ) -> Result<(), littlefs_rust::Error> {
-        let address = Self::address(block, offset);
-
-        self.flash
-            .write_nor(address, data)
-            .map_err(|_| {
-                error!(
-                    "LFS WRITE FAILED: block={} offset={} len={} address=0x{:08X}",
-                    block,
-                    offset,
-                    data.len(),
-                    address
-                );
-
-                littlefs_rust::Error::Io
-            })?;
-
-        Ok(())
-    }
-
-    fn erase(
-        &mut self,
-        block: u32,
-    ) -> Result<(), littlefs_rust::Error> {
-        let address = Self::address(block, 0);
-
-        self.flash
-            .erase(address, address + STORAGE_BLOCK_SIZE)
-            .map_err(|_| {
-                error!(
-                    "LFS ERASE FAILED: block={} address=0x{:08X}",
-                    block,
-                    address
-                );
-
-                littlefs_rust::Error::Io
-            })?;
-
-        Ok(())
-    }
-
-
-    fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
-        Ok(())
-    }
-}
-
 fn init_filesystem(
     flash: esp_hal::peripherals::FLASH<'static>,
 ) -> Filesystem<LittleFsStorage<'static>> {
+    let storage_partition_start_index = u32::from_str_radix(
+        STORAGE_PARTITION_START_INDEX.trim_start_matches("0x"),
+        16,
+    )
+    .unwrap();
+
     let storage = LittleFsStorage::new(
         FlashStorage::new(flash),
+        STORAGE_BLOCK_SIZE,
+        storage_partition_start_index
     );
 
     let mut config = Config::new(
