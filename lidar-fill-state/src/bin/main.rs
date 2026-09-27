@@ -5,9 +5,8 @@
 #![no_main]
 
 use core::fmt::{Write as FmtWrite};
-use core::ffi::c_void;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use edge_http::{
     io::{
         server::{
@@ -23,6 +22,13 @@ use edge_nal_embassy::{
 use esp_radio::wifi::DisconnectReason;
 use lidar_fill_state::modules::http_handler::HttpHandler;
 use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
+use lidar_fill_state::modules::vl53l8cx_lidar_service::{
+    CheckForNewDataError,
+    InitError,
+    StartRangingError,
+    StopRangingError,
+    VL53L8CxLidarService,
+};
 use log::{debug, error, info, warn, trace};
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -94,6 +100,8 @@ const WIFI_SSID: &str = env!("WIFI_SSID");
 /// The wifi password to use
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
+/// If true the lidar will start the ranging measurment. If it switches to false the measument will stop
+static LIDAR_RUN_STATE: AtomicBool = AtomicBool::new(false);
 /// The state of the system
 /// 
 /// Primarily used for the RGB led on the esp32
@@ -216,10 +224,13 @@ async fn main(spawner: Spawner) -> ! {
     .with_sda(peripherals.GPIO6)
     .with_scl(peripherals.GPIO7);
 
+    let lidar_service = VL53L8CxLidarService::new(i2c);
+
     debug!("Spawning VL53L8CX sensor task...");
     spawner.spawn(
-        sensor_task(i2c)
-            .expect("failed to spawn sensor task")
+        sensor_task(
+            lidar_service
+        ).expect("failed to spawn sensor task")
     );
 
     // START NETWORK TASK
@@ -921,313 +932,193 @@ fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
 //     }
 // }
 
-
-
-// C ======================
-
-const VL53L8CX_I2C_ADDRESS: u8 = 0x29;
-const VL53L8CX_RESOLUTION_8X8: u8 = 64;
-const VL53L8CX_RESOLUTION_8X8_VALUES: usize = 64;
-const VL53L8CX_TEMPORARY_BUFFER_SIZE: usize = 1452;
-const VL53L8CX_OFFSET_BUFFER_SIZE: usize = 488;
-const VL53L8CX_XTALK_BUFFER_SIZE: usize = 776;
-
-type Vl53Write = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
-type Vl53Read = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
-type Vl53Wait = extern "C" fn(*mut c_void, u32) -> u8;
-
-#[repr(C)]
-struct Vl53l8cxPlatform {
-    address: u16,
-    write: Vl53Write,
-    read: Vl53Read,
-    wait: Vl53Wait,
-    handle: *mut c_void,
-}
-
-#[repr(C)]
-struct Vl53l8cxConfiguration {
-    platform: Vl53l8cxPlatform,
-    streamcount: u8,
-    data_read_size: u32,
-    default_configuration: *mut u8,
-    default_xtalk: *mut u8,
-    offset_data: [u8; VL53L8CX_OFFSET_BUFFER_SIZE],
-    xtalk_data: [u8; VL53L8CX_XTALK_BUFFER_SIZE],
-    temp_buffer: [u8; VL53L8CX_TEMPORARY_BUFFER_SIZE],
-    is_auto_stop_enabled: u8,
-}
-
-#[repr(C)]
-struct Vl53l8cxMotionIndicator {
-    global_indicator_1: u32,
-    global_indicator_2: u32,
-    status: u8,
-    nb_of_detected_aggregates: u8,
-    nb_of_aggregates: u8,
-    spare: u8,
-    motion: [u32; 32],
-}
-
-#[repr(C)]
-struct Vl53l8cxResultsData {
-    silicon_temp_degc: i8,
-    ambient_per_spad: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
-    nb_target_detected: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
-    nb_spads_enabled: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
-    signal_per_spad: [u32; VL53L8CX_RESOLUTION_8X8_VALUES],
-    range_sigma_mm: [u16; VL53L8CX_RESOLUTION_8X8_VALUES],
-    distance_mm: [i16; VL53L8CX_RESOLUTION_8X8_VALUES],
-    reflectance: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
-    target_status: [u8; VL53L8CX_RESOLUTION_8X8_VALUES],
-    motion_indicator: Vl53l8cxMotionIndicator,
-}
-
-#[link(name = "vl53l8cx", kind = "static")]
-unsafe extern "C" {
-    fn vl53l8cx_init(device: *mut Vl53l8cxConfiguration) -> u8;
-    fn vl53l8cx_set_resolution(
-        device: *mut Vl53l8cxConfiguration,
-        resolution: u8,
-    ) -> u8;
-    fn vl53l8cx_start_ranging(device: *mut Vl53l8cxConfiguration) -> u8;
-    fn vl53l8cx_check_data_ready(
-        device: *mut Vl53l8cxConfiguration,
-        ready: *mut u8,
-    ) -> u8;
-    fn vl53l8cx_get_ranging_data(
-        device: *mut Vl53l8cxConfiguration,
-        results: *mut Vl53l8cxResultsData,
-    ) -> u8;
-}
-
-extern "C" fn vl53_i2c_write(
-    handle: *mut c_void,
-    register_address: u16,
-    values: *mut u8,
-    size: u32,
-) -> u8 {
-    let i2c = unsafe { &mut *(handle as *mut I2c<'static, Blocking>) };
-    let values = unsafe { core::slice::from_raw_parts(values, size as usize) };
-    let mut offset = 0;
-
-    while offset < values.len() {
-        let chunk_len = core::cmp::min(values.len() - offset, 32);
-        let mut buffer = [0u8; 258];
-        let address = register_address.wrapping_add(offset as u16);
-        buffer[0] = (address >> 8) as u8;
-        buffer[1] = address as u8;
-        buffer[2..2 + chunk_len].copy_from_slice(&values[offset..offset + chunk_len]);
-
-        if let Err(error) = i2c.write(
-            VL53L8CX_I2C_ADDRESS,
-            &buffer[..2 + chunk_len],
-        ) {
-            error!(
-                "VL53L8CX I2C write failed: register=0x{:04X} size={} error={:?}",
-                address,
-                chunk_len,
-                error,
-            );
-            return 1;
-        }
-        offset += chunk_len;
-    }
-
-    0
-}
-
-extern "C" fn vl53_i2c_read(
-    handle: *mut c_void,
-    register_address: u16,
-    values: *mut u8,
-    size: u32,
-) -> u8 {
-    let i2c = unsafe { &mut *(handle as *mut I2c<'static, Blocking>) };
-    let values = unsafe { core::slice::from_raw_parts_mut(values, size as usize) };
-    let mut offset = 0;
-
-    while offset < values.len() {
-        let chunk_len = core::cmp::min(values.len() - offset, 32);
-        let address = register_address.wrapping_add(offset as u16);
-        let address_bytes = [(address >> 8) as u8, address as u8];
-
-        if let Err(error) = i2c.write_read(
-            VL53L8CX_I2C_ADDRESS,
-            &address_bytes,
-            &mut values[offset..offset + chunk_len],
-        ) {
-            error!(
-                "VL53L8CX I2C read failed: register=0x{:04X} size={} error={:?}",
-                address,
-                chunk_len,
-                error,
-            );
-            return 1;
-        }
-        offset += chunk_len;
-    }
-
-    0
-}
-
-extern "C" fn vl53_wait(_handle: *mut c_void, milliseconds: u32) -> u8 {
-    esp_hal::delay::Delay::new().delay_millis(milliseconds);
-    0
-}
-
 #[embassy_executor::task]
-async fn sensor_task(mut i2c: I2c<'static, Blocking>) {
-    let platform = Vl53l8cxPlatform {
-        address: 0x52,
-        write: vl53_i2c_write,
-        read: vl53_i2c_read,
-        wait: vl53_wait,
-        handle: (&mut i2c as *mut I2c<'static, Blocking>).cast(),
+async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
+    LIDAR_RUN_STATE.store(true, Ordering::Relaxed);
+
+    match lidar_service.init() {
+        Ok(()) => {},
+        Err(err) => {
+            match err {
+                InitError::DeviceInitFailed { status } => {
+                    error!("The initilization of the lidar failed with status {}", status);
+                    return;
+                }
+                InitError::SettingResolutionFailed { status } => {
+                    error!("Error while trying to get the lidar device config (Status: {})", status);
+                    return;
+                }
+            }
+        }
     };
-
-    let mut device_storage = core::mem::MaybeUninit::<Vl53l8cxConfiguration>::uninit();
-    let device_ptr = device_storage.as_mut_ptr();
-    unsafe {
-        core::ptr::addr_of_mut!((*device_ptr).platform).write(platform);
-    }
-
-    let init_status = unsafe { vl53l8cx_init(device_ptr) };
-    if init_status != 0 {
-        error!("VL53L8CX init failed: {}", init_status);
-        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
-        return;
-    }
-
-    let mut device = unsafe { device_storage.assume_init() };
-
-    let resolution_status = unsafe {
-        vl53l8cx_set_resolution(&mut device, VL53L8CX_RESOLUTION_8X8)
-    };
-    if resolution_status != 0 {
-        error!("VL53L8CX set 8x8 resolution failed: {}", resolution_status);
-        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
-        return;
-    }
-
-    let start_status = unsafe { vl53l8cx_start_ranging(&mut device) };
-    if start_status != 0 {
-        error!("VL53L8CX start failed: {}", start_status);
-        SYSTEM_STATE.store(SystemState::SensorError as u8, Ordering::Relaxed);
-        return;
-    }
-
-    info!("VL53L8CX ranging started");
-    let mut results: Vl53l8cxResultsData = unsafe { core::mem::zeroed() };
 
     loop {
-        let mut ready = 0;
-        let ready_status = unsafe { vl53l8cx_check_data_ready(&mut device, &mut ready) };
+        let should_run = LIDAR_RUN_STATE.load(Ordering::Relaxed);
 
-        if ready_status != 0 {
-            error!("VL53L8CX ready check failed: {}", ready_status);
-        } else if ready != 0 {
-            let data_status = unsafe {
-                vl53l8cx_get_ranging_data(&mut device, &mut results)
-            };
-            if data_status == 0 {
+        if lidar_service.is_running != should_run {
+            match should_run {
+                true => {
+                    match lidar_service.start_ranging() {
+                        Ok(()) => info!("VL53L8CX ranging started"),
+                        Err(error) => {
+                            match error {
+                                StartRangingError::NotInitilized => {
+                                    error!("Couldn't start rainging. The lidar is not initialize.");
+                                    return;
+                                }
+                                StartRangingError::StartRangingFailed { status } => {
+                                    error!("Error while starting the ranging in the lidar (Status: {})", status);
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                }
+                false => {
+                    match lidar_service.stop_ranging() {
+                        Ok(()) => info!("VL53L8CX ranging stopped"),
+                        Err(error) => {
+                            match error {
+                                StopRangingError::NotInitilized => {
+                                    error!("Couldn't stop rainging. The lidar is not initialize.");
+                                    return;
+                                }
+                                StopRangingError::StopRangingFailed { status } => {
+                                    error!("Error while stopping the ranging in the lidar (Status: {})", status);
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                }
+            }
+        }
+
+        if lidar_service.is_running {
+            let mut do_read_values = false;
+            match lidar_service.check_for_new_data() {
+                Ok(has_new_data) => do_read_values = has_new_data,
+                Err(error) => {
+                    match error {
+                        CheckForNewDataError::NotInitilized => {
+                            error!("Couldn't check for new lidar data. The lidar is not initialize.");
+                        },
+                        CheckForNewDataError::ReadyError { status } => {
+                            error!("While checking if the lidar is ready it returned Status {}", status);
+                        },
+                        CheckForNewDataError::DataError { status } => {
+                            error!("While reading lidar data it returned Status {}", status);
+                        }
+                    }
+                }
+            }
+
+            if do_read_values {
+                let read_value = match lidar_service.getting_lidar_reading() {
+                    Some(mut receiver) => match receiver.try_get() {
+                        None => continue,
+                        Some(value) => value,
+                    },
+                    None => {
+                        error!("The lidar receiver couln't be received. Is the LidarService initilized?");
+                        return;
+                    }
+                };
+
                 info!(
-                    "VL53L8CX distance: {} mm, status: {}, temperature: {}, ({})",
-                    results.distance_mm[0],
-                    results.target_status[0],
-                    results.silicon_temp_degc,
-                    results.distance_mm.len()
+                        "VL53L8CX distance: {} mm, status: {}, temperature: {}",
+                        read_value.zones[0].distance_mm,
+                        read_value.zones[0].target_status,
+                        read_value.silicon_temp_degc
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[0]),
-                    left_pad(results.distance_mm[1]),
-                    left_pad(results.distance_mm[2]),
-                    left_pad(results.distance_mm[3]),
-                    left_pad(results.distance_mm[4]),
-                    left_pad(results.distance_mm[5]),
-                    left_pad(results.distance_mm[6]),
-                    left_pad(results.distance_mm[7])
+                    left_pad(read_value.zones[0].distance_mm),
+                    left_pad(read_value.zones[1].distance_mm),
+                    left_pad(read_value.zones[2].distance_mm),
+                    left_pad(read_value.zones[3].distance_mm),
+                    left_pad(read_value.zones[4].distance_mm),
+                    left_pad(read_value.zones[5].distance_mm),
+                    left_pad(read_value.zones[6].distance_mm),
+                    left_pad(read_value.zones[7].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[8]),
-                    left_pad(results.distance_mm[9]),
-                    left_pad(results.distance_mm[10]),
-                    left_pad(results.distance_mm[11]),
-                    left_pad(results.distance_mm[12]),
-                    left_pad(results.distance_mm[13]),
-                    left_pad(results.distance_mm[14]),
-                    left_pad(results.distance_mm[15])
+                    left_pad(read_value.zones[8].distance_mm),
+                    left_pad(read_value.zones[9].distance_mm),
+                    left_pad(read_value.zones[10].distance_mm),
+                    left_pad(read_value.zones[11].distance_mm),
+                    left_pad(read_value.zones[12].distance_mm),
+                    left_pad(read_value.zones[13].distance_mm),
+                    left_pad(read_value.zones[14].distance_mm),
+                    left_pad(read_value.zones[15].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[16]),
-                    left_pad(results.distance_mm[17]),
-                    left_pad(results.distance_mm[18]),
-                    left_pad(results.distance_mm[19]),
-                    left_pad(results.distance_mm[20]),
-                    left_pad(results.distance_mm[21]),
-                    left_pad(results.distance_mm[22]),
-                    left_pad(results.distance_mm[23])
+                    left_pad(read_value.zones[16].distance_mm),
+                    left_pad(read_value.zones[17].distance_mm),
+                    left_pad(read_value.zones[18].distance_mm),
+                    left_pad(read_value.zones[19].distance_mm),
+                    left_pad(read_value.zones[20].distance_mm),
+                    left_pad(read_value.zones[21].distance_mm),
+                    left_pad(read_value.zones[22].distance_mm),
+                    left_pad(read_value.zones[23].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[24]),
-                    left_pad(results.distance_mm[25]),
-                    left_pad(results.distance_mm[26]),
-                    left_pad(results.distance_mm[27]),
-                    left_pad(results.distance_mm[28]),
-                    left_pad(results.distance_mm[29]),
-                    left_pad(results.distance_mm[30]),
-                    left_pad(results.distance_mm[31])
+                    left_pad(read_value.zones[24].distance_mm),
+                    left_pad(read_value.zones[25].distance_mm),
+                    left_pad(read_value.zones[26].distance_mm),
+                    left_pad(read_value.zones[27].distance_mm),
+                    left_pad(read_value.zones[28].distance_mm),
+                    left_pad(read_value.zones[29].distance_mm),
+                    left_pad(read_value.zones[30].distance_mm),
+                    left_pad(read_value.zones[31].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[32]),
-                    left_pad(results.distance_mm[33]),
-                    left_pad(results.distance_mm[34]),
-                    left_pad(results.distance_mm[35]),
-                    left_pad(results.distance_mm[36]),
-                    left_pad(results.distance_mm[37]),
-                    left_pad(results.distance_mm[38]),
-                    left_pad(results.distance_mm[39])
+                    left_pad(read_value.zones[32].distance_mm),
+                    left_pad(read_value.zones[33].distance_mm),
+                    left_pad(read_value.zones[34].distance_mm),
+                    left_pad(read_value.zones[35].distance_mm),
+                    left_pad(read_value.zones[36].distance_mm),
+                    left_pad(read_value.zones[37].distance_mm),
+                    left_pad(read_value.zones[38].distance_mm),
+                    left_pad(read_value.zones[39].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[40]),
-                    left_pad(results.distance_mm[41]),
-                    left_pad(results.distance_mm[42]),
-                    left_pad(results.distance_mm[43]),
-                    left_pad(results.distance_mm[44]),
-                    left_pad(results.distance_mm[45]),
-                    left_pad(results.distance_mm[46]),
-                    left_pad(results.distance_mm[47])
+                    left_pad(read_value.zones[40].distance_mm),
+                    left_pad(read_value.zones[41].distance_mm),
+                    left_pad(read_value.zones[42].distance_mm),
+                    left_pad(read_value.zones[43].distance_mm),
+                    left_pad(read_value.zones[44].distance_mm),
+                    left_pad(read_value.zones[45].distance_mm),
+                    left_pad(read_value.zones[46].distance_mm),
+                    left_pad(read_value.zones[47].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[48]),
-                    left_pad(results.distance_mm[49]),
-                    left_pad(results.distance_mm[50]),
-                    left_pad(results.distance_mm[51]),
-                    left_pad(results.distance_mm[52]),
-                    left_pad(results.distance_mm[53]),
-                    left_pad(results.distance_mm[54]),
-                    left_pad(results.distance_mm[55])
+                    left_pad(read_value.zones[48].distance_mm),
+                    left_pad(read_value.zones[49].distance_mm),
+                    left_pad(read_value.zones[50].distance_mm),
+                    left_pad(read_value.zones[51].distance_mm),
+                    left_pad(read_value.zones[52].distance_mm),
+                    left_pad(read_value.zones[53].distance_mm),
+                    left_pad(read_value.zones[54].distance_mm),
+                    left_pad(read_value.zones[55].distance_mm)
                 );
                 info!(
                     "{} {} {} {} {} {} {} {}",
-                    left_pad(results.distance_mm[56]),
-                    left_pad(results.distance_mm[57]),
-                    left_pad(results.distance_mm[58]),
-                    left_pad(results.distance_mm[59]),
-                    left_pad(results.distance_mm[60]),
-                    left_pad(results.distance_mm[61]),
-                    left_pad(results.distance_mm[62]),
-                    left_pad(results.distance_mm[63])
+                    left_pad(read_value.zones[56].distance_mm),
+                    left_pad(read_value.zones[57].distance_mm),
+                    left_pad(read_value.zones[58].distance_mm),
+                    left_pad(read_value.zones[59].distance_mm),
+                    left_pad(read_value.zones[60].distance_mm),
+                    left_pad(read_value.zones[61].distance_mm),
+                    left_pad(read_value.zones[62].distance_mm),
+                    left_pad(read_value.zones[63].distance_mm)
                 );
-            } else {
-                error!("VL53L8CX data read failed: {}", data_status);
             }
         }
 
