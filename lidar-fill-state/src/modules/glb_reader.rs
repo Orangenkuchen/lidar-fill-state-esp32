@@ -4,12 +4,7 @@ use nojson::{JsonParseError, RawJson, RawJsonValue};
 use crate::modules::little_fs_storage::LittleFsStorage;
 
 /// The Size of the GLB. After the header the chunks start.
-const GLB_Header_Size: u8 = 12;
-
-/// The JSON-Type of a GLB-Chunk
-const GLB_CHUNK_TYPE_JSON: u32 = 0x4E4F534A;
-/// The BIN-Type of a GLB-Chunk
-const GLB_CHUNK_TYPE_BIN: u32 = 0x004E4942;
+const GLB_HEADER_SIZE: u32 = 12;
 
 /// The type of an chunk in the glb
 #[repr(u32)]
@@ -38,6 +33,10 @@ pub enum GlbParseError {
     FileReadFailed,
     /// The JSON chunk is not valid UTF-8 or JSON
     InvalidJson,
+    /// The mesh that represents the main container was not found
+    ContainerMeshNotFound,
+    /// The camera that represents the lidar was not found
+    LidarCameraNotFound
 }
 
 /// Checks the magic_number if it is a glb
@@ -50,7 +49,11 @@ pub fn is_glb_file(file_buffer: &[u8]) -> bool {
 }
 
 
-pub fn parse_file_data(file: File<'_, LittleFsStorage<'static>>) -> Result<GlbData, GlbParseError> {
+pub fn parse_file_data(
+    file: File<'_, LittleFsStorage<'static>>,
+    container_mesh_name: String,
+    lidar_camera_name: String
+) -> Result<GlbData, GlbParseError> {
     let header = match parse_glb_header(&file) {
         Ok(header) => header,
         Err(error) => return Err(error)
@@ -89,11 +92,124 @@ pub fn parse_file_data(file: File<'_, LittleFsStorage<'static>>) -> Result<GlbDa
     let json = GlbJsonChunk::try_from(raw_json.value())
         .map_err(|_| GlbParseError::InvalidJson)?;
 
-    // TODO: Pull information out of parsed json
+    let mut container_mesh: Option<GlbMesh> = None;
+    let mut lidar_camera: Option<GlbCamera> = None;
+    
+    for node in json.nodes {
+        if node.mesh.is_some() &&
+           node.name.as_deref().is_some_and(|f|f == container_mesh_name) {
+            container_mesh = Some(
+                GlbMesh {
+                    position_byte_offset: 0,
+                    position_byte_length: 0,
+                    indicies_byte_offset: None,
+                    indicies_byte_length: None,
+                    normals_byte_offset: None,
+                    normals_byte_length: None,
+                    rotation: node.rotation,
+                    translation: node.translation,
+                    scale: node.scale,
+                    matrix: node.matrix,
+                }
+            )
+        } else if node.camera.is_some() && 
+                  node.name.is_some_and(|f|f == lidar_camera_name) {
+            lidar_camera = Some(
+                GlbCamera {
+                    aspect_ratio: None,
+                    fov_radian: None,
+                    rotation: node.rotation,
+                    translation: node.translation,
+                    scale: node.scale,
+                    matrix: node.matrix,
+                }
+            )
+        }
+    }
+
+    let mut container_mesh = container_mesh
+        .ok_or(GlbParseError::ContainerMeshNotFound)?;
+    let mut lidar_camera = lidar_camera
+        .ok_or(GlbParseError::LidarCameraNotFound)?;
+
+    for camera in json.cameras {
+        if camera.name.is_some_and(|f| f == lidar_camera_name) {
+            lidar_camera.aspect_ratio = camera.perspective.aspect_ratio;
+            lidar_camera.fov_radian = Some(camera.perspective.yfov)
+        }
+    }
+
+    let mut container_json_mesh: Option<GlbJsonMesh> = None;
+    for mesh in json.meshes {
+        if mesh.name.as_deref() == Some(container_mesh_name.as_str()) {
+            container_json_mesh = Some(mesh);
+            break;
+        }
+    }
+
+    let container_json_mesh = container_json_mesh
+        .ok_or(GlbParseError::ContainerMeshNotFound)?;
+
+    if container_json_mesh.primitives.len() < 1 || json.accessors.len() != json.buffer_views.len() {
+        return Err(GlbParseError::InvalidJson); // TODO: Besserer Feler
+    }
+
+    let glb_bin_chunk_data_start = GLB_HEADER_SIZE + read_file_bytes;
+
+    let mut buffer_views_absolute: Vec<GlbBufferViewPosition> = Vec::new();
+
+    for i in 0..json.accessors.len() {
+        buffer_views_absolute.push(
+            GlbBufferViewPosition {
+                length: json.buffer_views[i].byte_length,
+                start: glb_bin_chunk_data_start + json.buffer_views[i].byte_offset
+            }
+        );
+    }
+
+    match container_json_mesh.primitives[0].attributes {
+        None => {},
+        Some(ref attributes ) => {
+            let buffer_view_position: &GlbBufferViewPosition = match buffer_views_absolute.get(attributes.position as usize) {
+                None => return Err(GlbParseError::InvalidJson),
+                Some(element) => element
+            };
+
+            container_mesh.position_byte_offset = buffer_view_position.start;
+            container_mesh.position_byte_length = buffer_view_position.length;
+
+            match attributes.normal {
+                None => {},
+                Some(normal) => {
+                    let buffer_view_position: &GlbBufferViewPosition = match buffer_views_absolute.get(normal as usize) {
+                        None => return Err(GlbParseError::InvalidJson),
+                        Some(element) => element
+                    };
+
+                    container_mesh.normals_byte_offset = Some(buffer_view_position.start);
+                    container_mesh.normals_byte_length = Some(buffer_view_position.length);
+                }
+            }
+        }
+    }
+
+    match container_json_mesh.primitives[0].indices {
+        None => {},
+        Some(indicies) => {
+            let buffer_view_position: &GlbBufferViewPosition = match buffer_views_absolute.get(indicies as usize) {
+                None => return Err(GlbParseError::InvalidJson),
+                Some(element) => element
+            };
+
+            container_mesh.indicies_byte_offset = Some(buffer_view_position.start);
+            container_mesh.indicies_byte_length = Some(buffer_view_position.length);
+        }
+    }
 
     Ok(GlbData {
         header: header.data,
-        json,
+        container_mesh,
+        lidar_camera,
     })
 }
 
@@ -129,7 +245,6 @@ fn parse_glb_header(file: &File<'_, LittleFsStorage<'static>>) -> Result<PraseRe
         }
     )
 }
-
 
 /// Parses the header of a chunk in the glb file
 /// 
@@ -196,8 +311,10 @@ pub struct GlbJsonNode {
     pub mesh: Option<u32>,
     pub camera: Option<u32>,
     pub name: Option<String>,
-    pub rotation: [f32; 4],
-    pub translation: [f32; 3],
+    pub rotation: Option<[f32; 4]>,
+    pub translation: Option<[f32; 3]>,
+    pub scale: Option<[f32; 3]>,
+    pub matrix: Option<[f32; 16]>,
 }
 
 pub struct GlbJsonCamera {
@@ -217,10 +334,16 @@ pub struct GlbJsonMesh {
 
 pub struct GlbJsonPrimitive {
     pub indices: Option<u32>,
+    pub attributes: Option<GlbJsonAttribute>
+}
+
+pub struct GlbJsonAttribute {
+    pub position: u32,
+    pub normal: Option<u32>
 }
 
 pub struct GlbJsonAccessor {
-    pub buffer_view: Option<u32>,
+    pub buffer_view: u32,
 }
 
 pub struct GlbJsonBufferView {
@@ -277,10 +400,10 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for GlbJsonNode {
             mesh: optional_member(value, "mesh")?,
             camera: optional_member(value, "camera")?,
             name: optional_member(value, "name")?,
-            rotation: optional_member(value, "rotation")?
-                .unwrap_or([0.0, 0.0, 0.0, 1.0]),
-            translation: optional_member(value, "translation")?
-                .unwrap_or([0.0, 0.0, 0.0]),
+            rotation: optional_member(value, "rotation")?,
+            translation: optional_member(value, "translation")?,
+            scale: optional_member(value, "scale")?,
+            matrix: optional_member(value, "matrix")?
         })
     }
 }
@@ -324,6 +447,18 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for GlbJsonPrimitive {
     fn try_from(value: RawJsonValue<'text, 'raw>) -> Result<Self, Self::Error> {
         Ok(Self {
             indices: optional_member(value, "indices")?,
+            attributes: optional_member(value,"attributes")?
+        })
+    }
+}
+
+impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for GlbJsonAttribute {
+    type Error = JsonParseError;
+
+    fn try_from(value: RawJsonValue<'text, 'raw>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            normal: optional_member(value, "NORMAL")?,
+            position: value.to_member( "POSITION")?.required()?.try_into()?,
         })
     }
 }
@@ -333,7 +468,7 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for GlbJsonAccessor {
 
     fn try_from(value: RawJsonValue<'text, 'raw>) -> Result<Self, Self::Error> {
         Ok(Self {
-            buffer_view: optional_member(value, "bufferView")?,
+            buffer_view: value.to_member("bufferView")?.required()?.try_into()?,
         })
     }
 }
@@ -353,6 +488,48 @@ impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for GlbJsonBufferView {
 pub struct GlbData {
     /// The Header of the GLB file
     pub header: GlbHeader,
-    /// Parsed data from the JSON chunk
-    pub json: GlbJsonChunk,
+    /// The mesh that is the container for the fill measurment
+    pub container_mesh: GlbMesh,
+    pub lidar_camera: GlbCamera
+}
+
+pub struct GlbMesh {
+    /// The offset relative to the start of the glb file where
+    /// the positions of this mesh lay
+    pub position_byte_offset: u32,
+    /// The length of bytes from the position_byte_offset that
+    /// the positions are
+    pub position_byte_length: u32,
+    /// The offset relative to the start of the glb file where
+    /// the vertextes of this mesh lay
+    pub indicies_byte_offset: Option<u32>,
+    /// The length of bytes from the vertexes_byte_offset that
+    /// the vertextes are
+    pub indicies_byte_length: Option<u32>,
+    /// The offset relative to the start of the glb file where
+    /// the normals of this mesh lay
+    pub normals_byte_offset: Option<u32>,
+    /// The length of bytes from the normals_byte_offset that
+    /// the normals are
+    pub normals_byte_length: Option<u32>,
+    pub rotation: Option<[f32; 4]>,
+    pub translation: Option<[f32; 3]>,
+    pub scale: Option<[f32; 3]>,
+    pub matrix: Option<[f32; 16]>,
+}
+
+pub struct GlbCamera {
+    /// The aspec ratio of the camera (width / height)
+    pub aspect_ratio: Option<f32>,
+    /// The fov of the camara in radians
+    pub fov_radian: Option<f32>,
+    pub rotation: Option<[f32; 4]>,
+    pub translation: Option<[f32; 3]>,
+    pub scale: Option<[f32; 3]>,
+    pub matrix: Option<[f32; 16]>,
+}
+
+pub struct GlbBufferViewPosition {
+    start: u32,
+    length: u32
 }
