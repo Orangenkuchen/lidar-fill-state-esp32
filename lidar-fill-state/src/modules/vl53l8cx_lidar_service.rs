@@ -1,9 +1,7 @@
-use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::{Receiver, Watch}};
 use esp_hal::{Blocking, i2c::master::I2c};
 use core::ffi::c_void;
 use embassy_time::Instant;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The errors that can happen while initilizing the lidar
 #[derive(Debug)]
@@ -366,7 +364,7 @@ extern "C" fn vl53_i2c_write(
         buffer[1] = address as u8;
         buffer[2..2 + chunk_len].copy_from_slice(&values[offset..offset + chunk_len]);
 
-        if let Err(error) = i2c.write(
+        if let Err(_error) = i2c.write(
             VL53L8CX_I2C_ADDRESS,
             &buffer[..2 + chunk_len],
         ) {
@@ -393,7 +391,7 @@ extern "C" fn vl53_i2c_read(
         let address = register_address.wrapping_add(offset as u16);
         let address_bytes = [(address >> 8) as u8, address as u8];
 
-        if let Err(error) = i2c.write_read(
+        if let Err(_error) = i2c.write_read(
             VL53L8CX_I2C_ADDRESS,
             &address_bytes,
             &mut values[offset..offset + chunk_len],

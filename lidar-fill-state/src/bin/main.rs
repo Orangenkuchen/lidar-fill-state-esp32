@@ -56,7 +56,6 @@ use esp_hal::{
     rng::Rng,
     time::Rate,
     timer::timg::TimerGroup,
-    Blocking,
 };
 use esp_hal::i2c::master::I2c;
 use esp_println as _;
