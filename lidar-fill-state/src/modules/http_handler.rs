@@ -15,6 +15,7 @@ use littlefs_rust::{
     Filesystem, OpenFlags
 };
 use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
     blocking_mutex::raw::NoopRawMutex,
     mutex::Mutex,
 };
@@ -26,13 +27,21 @@ const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
 /// The base css of the web pages of the webserver
 const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/base_style.css");
 
-use crate::modules::little_fs_storage::LittleFsStorage;
+use crate::modules::{
+    little_fs_storage::LittleFsStorage,
+    vl53l8cx_lidar_service::LidarReadingWatch,
+};
+
+pub type LidarJsonResponseBuffer =
+    Mutex<CriticalSectionRawMutex, heapless::String<16_384>>;
 
 pub struct HttpHandler {
     pub filesystem: &'static Mutex<
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
     >,
+    pub reading_watch: &'static LidarReadingWatch,
+    pub json_response_buffer: &'static LidarJsonResponseBuffer,
 }
 
 impl HttpHandler {
@@ -225,6 +234,100 @@ impl HttpHandler {
         Ok(())
     }
 
+    /// Returns the latest LIDAR data as JSON
+    async fn handle_get_api_data_full<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "application/json")],
+        ).await?;
+
+        let mut receiver = self.reading_watch.receiver().unwrap();
+        let lidar_reading = receiver.get().await;
+
+        let json = nojson::json(|f| {
+            f.object(|f| {
+                f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
+                f.member(
+                    "last_read_timestamp_ms",
+                    lidar_reading.last_read_timestamp.as_millis(),
+                )?;
+                f.member("zones", nojson::json(|f| {
+                    f.array(|f| {
+                        for zone in &lidar_reading.zones {
+                            f.element(nojson::json(|f| {
+                                f.object(|f| {
+                                    f.member("ambient_per_spad", zone.ambient_per_spad)?;
+                                    f.member("nb_target_detected", zone.nb_target_detected)?;
+                                    f.member("nb_spads_enabled", zone.nb_spads_enabled)?;
+                                    f.member("signal_per_spad", zone.signal_per_spad)?;
+                                    f.member("range_sigma_mm", zone.range_sigma_mm)?;
+                                    f.member("distance_mm", zone.distance_mm)?;
+                                    f.member("reflectance", zone.reflectance)?;
+                                    f.member("target_status", zone.target_status)
+                                })
+                            }))?;
+                        }
+                        Ok(())
+                    })
+                }))
+            })
+        });
+
+        let mut response = self.json_response_buffer.lock().await;
+        response.clear();
+        write!(response, "{}", json).unwrap();
+        conn.write_all(response.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Returns the latest LIDAR data as JSON
+    async fn handle_get_api_data<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "application/json")],
+        ).await?;
+
+        let mut receiver = self.reading_watch.receiver().unwrap();
+        let lidar_reading = receiver.get().await;
+
+        let mut distances: [i16; 64] = [0; 64];
+
+        for i in 0..64 {
+            distances[i] = lidar_reading.zones[i].distance_mm;
+        }
+
+        let json = nojson::json(|f| {
+            f.object(|f| {
+                f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
+                f.member(
+                    "last_read_timestamp_ms",
+                    lidar_reading.last_read_timestamp.as_millis(),
+                )?;
+                f.member("distance_mm", distances)
+            })
+        });
+
+        let mut response = self.json_response_buffer.lock().await;
+        response.clear();
+        write!(response, "{}", json).unwrap();
+        conn.write_all(response.as_bytes()).await?;
+        Ok(())
+    }
+
     async fn handle_not_found<T, const N: usize>(
         &self,
         conn: &mut Connection<'_, T, N>,
@@ -268,6 +371,8 @@ impl Handler for HttpHandler {
             (Method::Post, "/upload") => self.handle_post_upload(conn).await,
             (Method::Get, "/file") => self.handle_get_file(conn).await,
             (Method::Get, "/assets/base_style.css") => self.handle_get_base_css(conn).await,
+            (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
+            (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,
             _ => self.handle_not_found(conn).await,
         }
     }
