@@ -20,11 +20,13 @@ use edge_nal_embassy::{
     TcpBuffers,
 };
 use esp_radio::wifi::DisconnectReason;
-use lidar_fill_state::modules::http_handler::HttpHandler;
+use lidar_fill_state::modules::http_handler::{HttpHandler, LidarJsonResponseBuffer};
 use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
 use lidar_fill_state::modules::vl53l8cx_lidar_service::{
     CheckForNewDataError,
     InitError,
+    LidarReading,
+    LidarReadingWatch,
     StartRangingError,
     StopRangingError,
     VL53L8CxLidarService,
@@ -56,7 +58,6 @@ use esp_hal::{
     rng::Rng,
     time::Rate,
     timer::timg::TimerGroup,
-    Blocking,
 };
 use esp_hal::i2c::master::I2c;
 use esp_println as _;
@@ -74,8 +75,9 @@ use littlefs_rust::{
 };
 use esp_storage::FlashStorage;
 use embassy_sync::{
-    blocking_mutex::raw::NoopRawMutex,
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
+    watch::{Receiver, Watch},
 };
 
 #[repr(u8)]
@@ -117,6 +119,8 @@ static STACK_RESOURCES: StaticCell<StackResources<8>> =
     StaticCell::new();
 static TCP_BUFFERS: StaticCell<TcpBuffers<1, 8192, 8192>> =
     StaticCell::new();
+static LIDAR_READING: StaticCell<LidarReadingWatch> = StaticCell::new();
+static LIDAR_JSON_RESPONSE: StaticCell<LidarJsonResponseBuffer> = StaticCell::new();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -224,14 +228,30 @@ async fn main(spawner: Spawner) -> ! {
     .with_sda(peripherals.GPIO6)
     .with_scl(peripherals.GPIO7);
 
-    let lidar_service = VL53L8CxLidarService::new(i2c);
+    let reading_watch = LIDAR_READING.init(Watch::new());
+    let receiver = reading_watch.receiver().unwrap();
 
-    debug!("Spawning VL53L8CX sensor task...");
+    let mut lidar_service = VL53L8CxLidarService::new(i2c, reading_watch);
+    match lidar_service.init() {
+        Ok(()) => {},
+        Err(err) => {
+            match err {
+                InitError::DeviceInitFailed { status } => {
+                    error!("The initilization of the lidar failed with status {}", status);
+                }
+                InitError::SettingResolutionFailed { status } => {
+                    error!("Error while trying to get the lidar device config (Status: {})", status);
+                }
+            }
+        }
+    };
+
     spawner.spawn(
-        sensor_task(
-            lidar_service
-        ).expect("failed to spawn sensor task")
+        sensor_task(lidar_service).expect("failed to spawn sensor task")
     );
+    // spawner.spawn(
+    //     lidar_receiver_task(receiver).expect("failed to spawn lidar receiver task")
+    // );
 
     // START NETWORK TASK
     //
@@ -266,12 +286,17 @@ async fn main(spawner: Spawner) -> ! {
     let filesystem = FILESYSTEM.init(
         Mutex::new(init_filesystem(FLASH))
     );
+    let json_response_buffer = LIDAR_JSON_RESPONSE.init(
+        Mutex::new(heapless::String::new())
+    );
 
     spawner.spawn(
         web_server_task(
             network_components.stack,
             tcp_buffers,
             filesystem,
+            reading_watch,
+            json_response_buffer,
         )
         .expect("failed to spawn web server task")
     );
@@ -518,6 +543,8 @@ async fn web_server_task(
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
     >,
+    reading_watch: &'static LidarReadingWatch,
+    json_response_buffer: &'static LidarJsonResponseBuffer,
 ) -> ! {
     let tcp = Tcp::new(stack, tcp_buffers);
 
@@ -536,7 +563,7 @@ async fn web_server_task(
             .run_with_socket_queue::<_, _, 1>(
                 None,
                 acceptor,
-                HttpHandler { filesystem },
+                HttpHandler { filesystem, reading_watch, json_response_buffer },
             )
             .await
         {
@@ -936,22 +963,6 @@ fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
 async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
     LIDAR_RUN_STATE.store(true, Ordering::Relaxed);
 
-    match lidar_service.init() {
-        Ok(()) => {},
-        Err(err) => {
-            match err {
-                InitError::DeviceInitFailed { status } => {
-                    error!("The initilization of the lidar failed with status {}", status);
-                    return;
-                }
-                InitError::SettingResolutionFailed { status } => {
-                    error!("Error while trying to get the lidar device config (Status: {})", status);
-                    return;
-                }
-            }
-        }
-    };
-
     loop {
         let should_run = LIDAR_RUN_STATE.load(Ordering::Relaxed);
 
@@ -995,9 +1006,8 @@ async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
         }
 
         if lidar_service.is_running {
-            let mut do_read_values = false;
             match lidar_service.check_for_new_data() {
-                Ok(has_new_data) => do_read_values = has_new_data,
+                Ok(_) => {},
                 Err(error) => {
                     match error {
                         CheckForNewDataError::NotInitilized => {
@@ -1012,117 +1022,33 @@ async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
                     }
                 }
             }
-
-            if do_read_values {
-                let read_value = match lidar_service.getting_lidar_reading() {
-                    Some(mut receiver) => match receiver.try_get() {
-                        None => continue,
-                        Some(value) => value,
-                    },
-                    None => {
-                        error!("The lidar receiver couln't be received. Is the LidarService initilized?");
-                        return;
-                    }
-                };
-
-                info!(
-                        "VL53L8CX distance: {} mm, status: {}, temperature: {}",
-                        read_value.zones[0].distance_mm,
-                        read_value.zones[0].target_status,
-                        read_value.silicon_temp_degc
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[0].distance_mm),
-                    left_pad(read_value.zones[1].distance_mm),
-                    left_pad(read_value.zones[2].distance_mm),
-                    left_pad(read_value.zones[3].distance_mm),
-                    left_pad(read_value.zones[4].distance_mm),
-                    left_pad(read_value.zones[5].distance_mm),
-                    left_pad(read_value.zones[6].distance_mm),
-                    left_pad(read_value.zones[7].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[8].distance_mm),
-                    left_pad(read_value.zones[9].distance_mm),
-                    left_pad(read_value.zones[10].distance_mm),
-                    left_pad(read_value.zones[11].distance_mm),
-                    left_pad(read_value.zones[12].distance_mm),
-                    left_pad(read_value.zones[13].distance_mm),
-                    left_pad(read_value.zones[14].distance_mm),
-                    left_pad(read_value.zones[15].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[16].distance_mm),
-                    left_pad(read_value.zones[17].distance_mm),
-                    left_pad(read_value.zones[18].distance_mm),
-                    left_pad(read_value.zones[19].distance_mm),
-                    left_pad(read_value.zones[20].distance_mm),
-                    left_pad(read_value.zones[21].distance_mm),
-                    left_pad(read_value.zones[22].distance_mm),
-                    left_pad(read_value.zones[23].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[24].distance_mm),
-                    left_pad(read_value.zones[25].distance_mm),
-                    left_pad(read_value.zones[26].distance_mm),
-                    left_pad(read_value.zones[27].distance_mm),
-                    left_pad(read_value.zones[28].distance_mm),
-                    left_pad(read_value.zones[29].distance_mm),
-                    left_pad(read_value.zones[30].distance_mm),
-                    left_pad(read_value.zones[31].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[32].distance_mm),
-                    left_pad(read_value.zones[33].distance_mm),
-                    left_pad(read_value.zones[34].distance_mm),
-                    left_pad(read_value.zones[35].distance_mm),
-                    left_pad(read_value.zones[36].distance_mm),
-                    left_pad(read_value.zones[37].distance_mm),
-                    left_pad(read_value.zones[38].distance_mm),
-                    left_pad(read_value.zones[39].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[40].distance_mm),
-                    left_pad(read_value.zones[41].distance_mm),
-                    left_pad(read_value.zones[42].distance_mm),
-                    left_pad(read_value.zones[43].distance_mm),
-                    left_pad(read_value.zones[44].distance_mm),
-                    left_pad(read_value.zones[45].distance_mm),
-                    left_pad(read_value.zones[46].distance_mm),
-                    left_pad(read_value.zones[47].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[48].distance_mm),
-                    left_pad(read_value.zones[49].distance_mm),
-                    left_pad(read_value.zones[50].distance_mm),
-                    left_pad(read_value.zones[51].distance_mm),
-                    left_pad(read_value.zones[52].distance_mm),
-                    left_pad(read_value.zones[53].distance_mm),
-                    left_pad(read_value.zones[54].distance_mm),
-                    left_pad(read_value.zones[55].distance_mm)
-                );
-                info!(
-                    "{} {} {} {} {} {} {} {}",
-                    left_pad(read_value.zones[56].distance_mm),
-                    left_pad(read_value.zones[57].distance_mm),
-                    left_pad(read_value.zones[58].distance_mm),
-                    left_pad(read_value.zones[59].distance_mm),
-                    left_pad(read_value.zones[60].distance_mm),
-                    left_pad(read_value.zones[61].distance_mm),
-                    left_pad(read_value.zones[62].distance_mm),
-                    left_pad(read_value.zones[63].distance_mm)
-                );
-            }
         }
 
         Timer::after(Duration::from_millis(20)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn lidar_receiver_task(
+    mut receiver: Receiver<'static, CriticalSectionRawMutex, LidarReading, 4>,
+) {
+    loop {
+        let reading = receiver.changed().await;
+        info!(
+            "VL53L8CX distance: {} mm, status: {}, temperature: {}",
+            reading.zones[0].distance_mm,
+            reading.zones[0].target_status,
+            reading.silicon_temp_degc,
+        );
+
+        for row in 0..8 {
+            let mut line = heapless::String::<256>::new();
+            for column in 0..8 {
+                let zone = reading.zones[row * 8 + column];
+                let _ = write!(line, "{} ", left_pad(zone.distance_mm));
+            }
+            info!("{}", line);
+        }
     }
 }
 

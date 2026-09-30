@@ -1,9 +1,9 @@
-use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::{Receiver, Watch}};
 use esp_hal::{Blocking, i2c::master::I2c};
 use core::ffi::c_void;
-use embassy_time::Instant;
 use core::sync::atomic::{AtomicBool, Ordering};
+use embassy_time::Instant;
+use log::error;
 
 /// The errors that can happen while initilizing the lidar
 #[derive(Debug)]
@@ -84,11 +84,14 @@ pub struct VL53L8CxLidarService {
     device_configuration: Option<Vl53l8cxConfiguration>,
 
     /// The device configuraiton of the lidar
-    pub lidar_reading: Watch<CriticalSectionRawMutex, LidarReading, 4>,
+    pub lidar_reading: &'static LidarReadingWatch,
 
     /// Show that the ranging is running
     pub is_running: bool
 }
+
+pub type LidarReadingWatch =
+    Watch<CriticalSectionRawMutex, LidarReading, 4>;
 
 impl VL53L8CxLidarService {
     /// Initializes the Struct
@@ -96,12 +99,12 @@ impl VL53L8CxLidarService {
     /// ### Parameters:
     /// **spawner**: Spawner that will be used inside the service
     /// **i2c**: The I²C connection to the lidar
-    pub fn new(i2c: I2c<'static, Blocking>) -> Self {
+    pub fn new(i2c: I2c<'static, Blocking>, lidar_reading: &'static LidarReadingWatch) -> Self {
         Self {
             i2c,
             device_configuration: None,
-            lidar_reading: Watch::new(),
-            is_running: false
+            lidar_reading,
+            is_running: false,
         }
     }
 
@@ -176,8 +179,10 @@ impl VL53L8CxLidarService {
     }
 
     /// Tries to get a reciever for the lidar_reading
-    pub fn getting_lidar_reading(&self) -> Option<Receiver<'_, CriticalSectionRawMutex, LidarReading, 4>> {
-        return self.lidar_reading.receiver();
+    pub fn getting_lidar_reading(
+        &self,
+    ) -> Option<Receiver<'static, CriticalSectionRawMutex, LidarReading, 4>> {
+        self.lidar_reading.receiver()
     }
 
     /// Check the lidar for new data. If new data are available the data will be available via getting_lidar_reading
@@ -260,6 +265,7 @@ const VL53L8CX_RESOLUTION_8X8_VALUES: usize = 64;
 const VL53L8CX_TEMPORARY_BUFFER_SIZE: usize = 1452;
 const VL53L8CX_OFFSET_BUFFER_SIZE: usize = 488;
 const VL53L8CX_XTALK_BUFFER_SIZE: usize = 776;
+static I2C_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
 type Vl53Write = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
 type Vl53Read = extern "C" fn(*mut c_void, u16, *mut u8, u32) -> u8;
@@ -366,10 +372,13 @@ extern "C" fn vl53_i2c_write(
         buffer[1] = address as u8;
         buffer[2..2 + chunk_len].copy_from_slice(&values[offset..offset + chunk_len]);
 
-        if let Err(error) = i2c.write(
+        if let Err(_error) = i2c.write(
             VL53L8CX_I2C_ADDRESS,
             &buffer[..2 + chunk_len],
         ) {
+            if !I2C_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                error!("VL53L8CX I2C write failed at register {:#06x}: {:?}", address, _error);
+            }
             return 1;
         }
         offset += chunk_len;
@@ -393,11 +402,14 @@ extern "C" fn vl53_i2c_read(
         let address = register_address.wrapping_add(offset as u16);
         let address_bytes = [(address >> 8) as u8, address as u8];
 
-        if let Err(error) = i2c.write_read(
+        if let Err(_error) = i2c.write_read(
             VL53L8CX_I2C_ADDRESS,
             &address_bytes,
             &mut values[offset..offset + chunk_len],
         ) {
+            if !I2C_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
+                error!("VL53L8CX I2C read failed at register {:#06x}: {:?}", address, _error);
+            }
             return 1;
         }
         offset += chunk_len;
