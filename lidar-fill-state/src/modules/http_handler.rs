@@ -12,7 +12,7 @@ use log::{error, info, trace};
 use embedded_io_async::{Read, Write};
 use esp_println as _;
 use littlefs_rust::{
-    Filesystem, OpenFlags
+    Error, Filesystem, OpenFlags
 };
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
@@ -30,6 +30,10 @@ const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/assets/base_style.c
 const HTTP_FAV_ICON: &'static [u8] = include_bytes!("../../../web/favicon.ico");
 /// The Path of the 3D-Model in the filesystem
 const GLB_FILE_PATH: &str = "Model.glb";
+/// The size of a storage block
+const STORAGE_BLOCK_SIZE: u32 = 4 * 1_024; // TODO: Mit main.rs const verbinden
+/// The amount of blocks in the storage
+const STORAGE_BLOCK_COUNT: u32 = 528; // TODO: Mit main.rs const verbinden
 
 use crate::modules::{
     little_fs_storage::LittleFsStorage,
@@ -399,4 +403,33 @@ impl Handler for HttpHandler {
             _ => self.handle_not_found(conn).await,
         }
     }
+}
+
+/// Get the stats for the file system
+fn get_fs_stat(
+    fs: MutexGuard<'_, NoopRawMutex, Filesystem<LittleFsStorage<'static>>>
+) -> Result<FileSystemStat, Error> {
+    let total_bytes = STORAGE_BLOCK_SIZE * STORAGE_BLOCK_COUNT;
+    let used_bytes = match fs.fs_size() {
+        Ok(used_blocks) => used_blocks * STORAGE_BLOCK_SIZE,
+        Err(error) => return Err(error)
+    };
+
+    return Ok(
+        FileSystemStat {
+            total_bytes: total_bytes,
+            used_bytes: used_bytes,
+            free_bytes: total_bytes - used_bytes
+        }
+    );
+}
+
+/// Stats from the file system
+struct FileSystemStat {
+    /// The total size of the filesytem
+    pub total_bytes: u32,
+    /// The used bytes of the filesystem
+    pub used_bytes: u32,
+    /// The free bytes on the filesystem
+    pub free_bytes: u32
 }
