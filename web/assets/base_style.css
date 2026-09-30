@@ -1,0 +1,112 @@
+body {
+    --background-color: white;
+    --font-color: black;
+    --button-background: #dfdfdf;
+    --button-background-hover: #c4c4c4;
+    --button-background-hover-active: #9c9c9c;
+    --button-border-color: #969696;
+    --input-background: #eeeeee;
+    --input-background-selected: #dddddd;
+    --invalid-color: #9c0000;
+    
+    background-color: var(--background-color);
+    color: var(--font-color);
+    font-family: "Ubuntu", sans-serif;
+
+    height: 100%;
+    width: 100%;
+    overflow: auto;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        --background-color: #191a1b;
+        --font-color: white;
+        --button-background: #38383a;
+        --button-background-hover: #48484b;
+        --button-background-hover-active: #4d4d50;
+        --button-border-color: #54595d;
+        --input-background: #161618;
+        --input-background-selected: #202024;
+        --invalid-color: #6b0000;
+    }
+}
+
+form {
+    display: flex;
+    flex-direction: column;
+
+    gap: 15px;
+
+    &.Thin {
+        max-width: 400px;
+    }
+
+    label {
+        p {
+            margin: 0;
+        }
+    }
+
+    input {
+        width: 100%;
+    }
+}
+
+button,
+input[type=submit],
+input[type=button] {
+    background-color: var(--button-background);
+
+    border-color: var(--button-border-color);
+    border-style: solid;
+    border-width: 1px;
+    border-radius: 7px;
+
+    color: var(--font-color);
+
+    padding: 5px;
+
+    &:hover {
+        background-color: var(--button-background-hover);
+
+        &:active {
+            background-color: var(--button-background-hover-active);
+        }
+    }
+
+    cursor: pointer;
+}
+
+input:not([type=submit]):not([type=button]) {
+    background-color: var(--input-background);
+    border-color: var(--button-border-color);
+    border-style: solid;
+    border-width: 1px;
+    
+    padding: 5px;
+    
+    color: var(--font-color);
+
+    &:focus {
+        background-color: var(--input-background-selected);
+    }
+
+    &:invalid {
+        border-color: var(--invalid-color)
+    }
+}
+
+input[type=file] {
+    cursor: pointer;
+}
+
+.ValidationHint {
+    display: none;    
+}
+
+*:invalid {
+    .ValidationHint {
+        display: none;    
+    }
+}
