@@ -25,7 +25,11 @@ const HTTP_INDEX_HTML: &str = include_str!("../../../web/index.html");
 /// The html of the upload page of the webserver
 const HTTP_UPLOAD_HTML: &str = include_str!("../../../web/upload.html");
 /// The base css of the web pages of the webserver
-const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/base_style.css");
+const HTTP_BASE_STYLE_CSS: &str = include_str!("../../../web/assets/base_style.css");
+/// The Fav-Icon of the website
+const HTTP_FAV_ICON: &'static [u8] = include_bytes!("../../../web/favicon.ico");
+/// The Path of the 3D-Model in the filesystem
+const GLB_FILE_PATH: &str = "Model.glb";
 
 use crate::modules::{
     little_fs_storage::LittleFsStorage,
@@ -234,6 +238,24 @@ impl HttpHandler {
         Ok(())
     }
 
+    /// Returns the favicon.ico
+    async fn handle_get_favicon<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[("Content-Type", "image/x-icon")],
+        ).await?;
+
+        conn.write_all(HTTP_FAV_ICON).await?;
+        Ok(())
+    }
+
     /// Returns the latest LIDAR data as JSON
     async fn handle_get_api_data_full<T, const N: usize>(
         &self,
@@ -371,6 +393,7 @@ impl Handler for HttpHandler {
             (Method::Post, "/upload") => self.handle_post_upload(conn).await,
             (Method::Get, "/file") => self.handle_get_file(conn).await,
             (Method::Get, "/assets/base_style.css") => self.handle_get_base_css(conn).await,
+            (Method::Get, "/favicon.ico") => self.handle_get_favicon(conn).await,
             (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
             (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,
             _ => self.handle_not_found(conn).await,
