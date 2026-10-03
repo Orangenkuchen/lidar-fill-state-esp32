@@ -48,7 +48,6 @@ pub fn is_glb_file(file_buffer: &[u8]) -> bool {
     file_buffer.starts_with(b"glTF")
 }
 
-
 pub fn parse_file_data(
     file: File<'_, LittleFsStorage<'static>>,
     container_mesh_name: String,

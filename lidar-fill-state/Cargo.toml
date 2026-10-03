@@ -48,7 +48,6 @@ esp-storage = { version = "0.10.0", features = [
 embedded-storage = "0.3.2"
 
 littlefs-rust = { version = "0.1.0", default-features = false, features = ["alloc"] }
-nojson = { version = "0.3.15", default-features = false }
 
 embassy-executor = { version = "0.10.0", features = [] }
 embassy-time = "0.5.0"
