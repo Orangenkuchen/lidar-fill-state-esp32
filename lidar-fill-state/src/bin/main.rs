@@ -249,9 +249,9 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(
         sensor_task(lidar_service).expect("failed to spawn sensor task")
     );
-    // spawner.spawn(
-    //     lidar_receiver_task(receiver).expect("failed to spawn lidar receiver task")
-    // );
+    spawner.spawn(
+        lidar_receiver_task(receiver).expect("failed to spawn lidar receiver task")
+    );
 
     // START NETWORK TASK
     //
