@@ -8,6 +8,7 @@ body {
     --input-background: #eeeeee;
     --input-background-selected: #dddddd;
     --invalid-color: #9c0000;
+    --form-border-color: #969696;
     
     background-color: var(--background-color);
     color: var(--font-color);
@@ -16,6 +17,10 @@ body {
     height: 100%;
     width: 100%;
     overflow: auto;
+
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,6 +34,7 @@ body {
         --input-background: #161618;
         --input-background-selected: #202024;
         --invalid-color: #6b0000;
+        --form-border-color: #54595d;
     }
 }
 
@@ -37,6 +43,8 @@ form {
     flex-direction: column;
 
     gap: 15px;
+
+    overflow: hidden;
 
     &.Thin {
         max-width: 400px;
@@ -48,8 +56,21 @@ form {
         }
     }
 
+    .InputContainer {
+        display: flex;
+        flex-direction: row;
+    }
+
     input {
         width: 100%;
+    }
+
+    &.Border {
+        border-style: solid;
+        border-width: 1px;
+        border-color: var(--form-border-color);
+
+        padding: 15px;
     }
 }
 

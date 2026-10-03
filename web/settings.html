@@ -10,18 +10,27 @@
 </head>
 <body>
     <h1>Einstellungen</h1>
-    <form class="Thin">
+    <form action="/settings" method="post" class="Thin Border">
         <label>
             <p>Wifi-Name</p>
-            <input name="wifi_name" required type="text" />
+            <div class="InputContainer">
+                <input name="wifi_name" required type="text" />
+            </div>
         </label>
         <label>
             <p>Wifi-Passwort</p>
-            <input name="wifi_password" required type="password" />
+            <div class="InputContainer">
+                <input name="wifi_password" required type="password" />
+            </div>
         </label>
+        <input type="submit" value="Speichern" />
+    </form>
+    <form class="Thin Border">
         <label>
             <p>3D-Model</p>
-            <input id="file" required name="3d_model" type="file" accept="model/gltf-binary" />
+            <div class="InputContainer">
+                <input id="file" required name="3d_model" type="file" accept="model/gltf-binary" />
+            </div>
         </label>
         <input type="submit" value="Speichern" />
     </form>
@@ -44,7 +53,7 @@
 
             status.textContent = "Upload läuft...";
 
-            const response = await fetch("/upload", {
+            const response = await fetch("/settings", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/octet-stream"
