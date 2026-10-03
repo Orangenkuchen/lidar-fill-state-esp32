@@ -1,6 +1,7 @@
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::{Receiver, Watch}};
 use esp_hal::{Blocking, i2c::master::I2c};
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::Instant;
 use log::error;
 
