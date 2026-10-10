@@ -20,6 +20,7 @@ use edge_nal_embassy::{
     TcpBuffers,
 };
 use esp_radio::wifi::DisconnectReason;
+use lidar_fill_state::modules::file_manager::FileManager;
 use lidar_fill_state::modules::http_handler::{HttpHandler, LidarJsonResponseBuffer};
 use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
 use lidar_fill_state::modules::vl53l8cx_lidar_service::{
@@ -290,11 +291,16 @@ async fn main(spawner: Spawner) -> ! {
         Mutex::new(heapless::String::new())
     );
 
+    let file_manager = FILE_MANAGER.init(
+        Mutex::new(FileManager { filesystem: filesystem })
+    );
+
     spawner.spawn(
         web_server_task(
             network_components.stack,
             tcp_buffers,
             filesystem,
+            file_manager,
             reading_watch,
             json_response_buffer,
         )
@@ -543,6 +549,10 @@ async fn web_server_task(
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
     >,
+    file_manager: &'static Mutex<
+        NoopRawMutex,
+        FileManager,
+    >,
     reading_watch: &'static LidarReadingWatch,
     json_response_buffer: &'static LidarJsonResponseBuffer,
 ) -> ! {
@@ -563,7 +573,12 @@ async fn web_server_task(
             .run_with_socket_queue::<_, _, 1>(
                 None,
                 acceptor,
-                HttpHandler { filesystem, reading_watch, json_response_buffer },
+                HttpHandler {
+                    filesystem,
+                    file_manager,
+                    reading_watch, 
+                    json_response_buffer
+                },
             )
             .await
         {
@@ -806,6 +821,7 @@ fn init_filesystem(
 static FILESYSTEM: StaticCell<
     Mutex<NoopRawMutex, Filesystem<LittleFsStorage<'static>>>
 > = StaticCell::new();
+static FILE_MANAGER: StaticCell<Mutex<NoopRawMutex, FileManager>> = StaticCell::new();
 
 fn log_heap_usage() {
     let used = esp_alloc::HEAP.used();
