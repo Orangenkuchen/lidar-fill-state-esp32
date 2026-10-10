@@ -57,7 +57,6 @@ impl Storage for LittleFsStorage<'_> {
         result
     }
 
-
     fn write(
         &mut self,
         block: u32,
@@ -103,7 +102,6 @@ impl Storage for LittleFsStorage<'_> {
 
         Ok(())
     }
-
 
     fn sync(&mut self) -> Result<(), littlefs_rust::Error> {
         Ok(())

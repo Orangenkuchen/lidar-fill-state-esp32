@@ -1,0 +1,506 @@
+{
+    "openapi": "3.0.3",
+    "info": {
+        "title": "Lidar Fill State ESP32 API",
+        "version": "1.0.0",
+        "description": "HTTP API for LIDAR readings, device settings, storage statistics, and the active 3D model."
+    },
+    "servers": [
+        {
+            "url": "http://192.168.178.36/",
+            "description": "Same host as the ESP32 web interface"
+        }
+    ],
+    "tags": [
+        {
+            "name": "LIDAR",
+            "description": "Sensor readings"
+        },
+        {
+            "name": "Settings",
+            "description": "Device configuration"
+        },
+        {
+            "name": "Storage",
+            "description": "Filesystem statistics"
+        },
+        {
+            "name": "3D model",
+            "description": "Active GLB model file"
+        }
+    ],
+    "paths": {
+        "/api/data": {
+            "get": {
+                "tags": [
+                    "LIDAR"
+                ],
+                "summary": "Get the latest compact LIDAR reading",
+                "operationId": "getLidarData",
+                "responses": {
+                    "200": {
+                        "description": "Latest temperature, timestamp, and 64 measured distances",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LidarData"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/api/datafull": {
+            "get": {
+                "tags": [
+                    "LIDAR"
+                ],
+                "summary": "Get the latest full LIDAR reading",
+                "operationId": "getLidarDataFull",
+                "responses": {
+                    "200": {
+                        "description": "Latest reading with all 64 zone measurements",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LidarDataFull"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/api/storage": {
+            "get": {
+                "tags": [
+                    "Storage"
+                ],
+                "summary": "Get filesystem capacity and usage",
+                "operationId": "getStorageInfo",
+                "responses": {
+                    "200": {
+                        "description": "Filesystem statistics in bytes",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/FileSystemStat"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/api/file-system-stats": {
+            "get": {
+                "tags": [
+                    "Storage"
+                ],
+                "summary": "Alias for storage statistics",
+                "operationId": "getFileSystemStats",
+                "responses": {
+                    "200": {
+                        "description": "Filesystem statistics in bytes",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/FileSystemStat"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/api/settings": {
+            "get": {
+                "tags": [
+                    "Settings"
+                ],
+                "summary": "Download the current settings resource",
+                "description": "The current handler implementation returns the active GLB model from this route, rather than a Settings object.",
+                "operationId": "getSettings",
+                "responses": {
+                    "200": {
+                        "description": "Currently returns the active GLB model due to the handler implementation",
+                        "content": {
+                            "model/gltf-binary": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            },
+            "put": {
+                "tags": [
+                    "Settings"
+                ],
+                "summary": "Store device settings",
+                "description": "The handler parses a Settings object. Its Content-Type check currently rejects application/json, so the implementation does not currently accept the documented JSON media type.",
+                "operationId": "putSettings",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/Settings"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Settings stored"
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/model3d": {
+            "get": {
+                "tags": [
+                    "3D model"
+                ],
+                "summary": "Download the active 3D model",
+                "operationId": "getModel3d",
+                "responses": {
+                    "200": {
+                        "description": "GLB model file",
+                        "content": {
+                            "model/gltf-binary": {
+                                "schema": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Content-Disposition": {
+                                "schema": {
+                                    "type": "string",
+                                    "example": "attachment; filename=\"Model.glb\""
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            },
+            "put": {
+                "tags": [
+                    "3D model"
+                ],
+                "summary": "Replace the active 3D model",
+                "operationId": "putModel3d",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "model/gltf-binary": {
+                            "schema": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        },
+                        "application/octet-stream": {
+                            "schema": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": "Model saved"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/InternalServerError"
+                    }
+                }
+            }
+        },
+        "/settings": {
+            "post": {
+                "tags": [
+                    "Settings"
+                ],
+                "summary": "Submit the settings page upload form",
+                "description": "This route currently returns a text response and does not persist settings or consume the uploaded model.",
+                "operationId": "postSettings",
+                "requestBody": {
+                    "content": {
+                        "application/octet-stream": {
+                            "schema": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Upload handler response",
+                        "content": {
+                            "text/plain": {
+                                "schema": {
+                                    "type": "string",
+                                    "example": "Upload successful\n"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "Settings": {
+                "type": "object",
+                "required": [
+                    "main_mesh_name",
+                    "lidar_camera_name",
+                    "wifi_ssid",
+                    "wifi_password"
+                ],
+                "properties": {
+                    "main_mesh_name": {
+                        "type": "string",
+                        "description": "Name of the container mesh in the GLB model"
+                    },
+                    "lidar_camera_name": {
+                        "type": "string",
+                        "description": "Name of the LIDAR camera in the GLB model"
+                    },
+                    "wifi_ssid": {
+                        "type": "string",
+                        "description": "Wi-Fi network name"
+                    },
+                    "wifi_password": {
+                        "type": "string",
+                        "format": "password",
+                        "description": "Wi-Fi password"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "LidarData": {
+                "type": "object",
+                "required": [
+                    "silicon_temp_degc",
+                    "last_read_timestamp_ms",
+                    "distance_mm"
+                ],
+                "properties": {
+                    "silicon_temp_degc": {
+                        "type": "integer",
+                        "format": "int32",
+                        "description": "Sensor silicon temperature in degrees Celsius"
+                    },
+                    "last_read_timestamp_ms": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Elapsed time at the last reading, in milliseconds"
+                    },
+                    "distance_mm": {
+                        "type": "array",
+                        "description": "Distances in millimeters for the 8x8 sensor zones",
+                        "minItems": 64,
+                        "maxItems": 64,
+                        "items": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    }
+                }
+            },
+            "LidarDataFull": {
+                "type": "object",
+                "required": [
+                    "silicon_temp_degc",
+                    "last_read_timestamp_ms",
+                    "zones"
+                ],
+                "properties": {
+                    "silicon_temp_degc": {
+                        "type": "integer",
+                        "format": "int32",
+                        "description": "Sensor silicon temperature in degrees Celsius"
+                    },
+                    "last_read_timestamp_ms": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Elapsed time at the last reading, in milliseconds"
+                    },
+                    "zones": {
+                        "type": "array",
+                        "minItems": 64,
+                        "maxItems": 64,
+                        "items": {
+                            "$ref": "#/components/schemas/LidarZone"
+                        }
+                    }
+                }
+            },
+            "LidarZone": {
+                "type": "object",
+                "required": [
+                    "ambient_per_spad",
+                    "nb_target_detected",
+                    "nb_spads_enabled",
+                    "signal_per_spad",
+                    "range_sigma_mm",
+                    "distance_mm",
+                    "reflectance",
+                    "target_status"
+                ],
+                "properties": {
+                    "ambient_per_spad": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Ambient noise in kcps/spad"
+                    },
+                    "nb_target_detected": {
+                        "type": "integer",
+                        "format": "int32",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Number of valid targets detected"
+                    },
+                    "nb_spads_enabled": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Number of SPADs enabled"
+                    },
+                    "signal_per_spad": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Signal returned to the sensor in kcps/spad"
+                    },
+                    "range_sigma_mm": {
+                        "type": "integer",
+                        "format": "int32",
+                        "minimum": 0,
+                        "maximum": 65535,
+                        "description": "Distance uncertainty in millimeters"
+                    },
+                    "distance_mm": {
+                        "type": "integer",
+                        "format": "int32",
+                        "description": "Measured distance in millimeters"
+                    },
+                    "reflectance": {
+                        "type": "integer",
+                        "format": "int32",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Estimated reflectance in percent"
+                    },
+                    "target_status": {
+                        "type": "integer",
+                        "format": "int32",
+                        "minimum": 0,
+                        "maximum": 255,
+                        "description": "Target status; values 5 and 9 indicate valid ranging"
+                    }
+                }
+            },
+            "FileSystemStat": {
+                "type": "object",
+                "required": [
+                    "total_bytes",
+                    "used_bytes",
+                    "free_bytes"
+                ],
+                "properties": {
+                    "total_bytes": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Total filesystem size in bytes"
+                    },
+                    "used_bytes": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Used filesystem space in bytes"
+                    },
+                    "free_bytes": {
+                        "type": "integer",
+                        "format": "int64",
+                        "minimum": 0,
+                        "description": "Free filesystem space in bytes"
+                    }
+                }
+            },
+            "Error": {
+                "type": "string",
+                "description": "Plain-text error response"
+            }
+        },
+        "responses": {
+            "BadRequest": {
+                "description": "The request body or content type is invalid",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "InternalServerError": {
+                "description": "An internal filesystem or request-processing error occurred",
+                "content": {
+                    "text/plain": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        }
+                    }
+                }
+            },
+            "NotFound": {
+                "description": "The requested route was not found",
+                "content": {
+                    "text/plain": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
