@@ -10,15 +10,16 @@ use edge_http::{
     Method,
 };
 use heapless::CapacityError;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use embedded_io_async::{Read, Write};
 use esp_println as _;
 use littlefs_rust::{
-    Error, Filesystem
+    Error, Filesystem, OpenFlags
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::{Mutex, MutexGuard},
 };
+use embassy_time::{Duration, with_timeout};
 
 pub enum WriteFileFromRequestError<E> {
     Fs(Error),
@@ -49,6 +50,8 @@ const HTTP_FAV_ICON: &'static [u8] = include_bytes!("../../../web/favicon.ico");
 const HTTP_SWAGGER_HTML: &'static [u8] = include_bytes!("../../../web/swagger/index.html");
 /// The openapi json for the this api
 const HTTP_OPENAPI_JSON: &'static [u8] = include_bytes!("../../../web/swagger/openapi.json");
+/// The html of the settings saved page
+const HTTP_SETTINGS_SAVE_SUCCESS_HTML: &'static [u8] = include_bytes!("../../../web/settings_success.html");
 /// The Path of the 3D-Model in the filesystem
 const GLB_FILE_PATH: &str = "Model.glb";
 /// The Path of the Settings-File in the filesystem
@@ -63,7 +66,7 @@ const HTTP_CONNECTION_BUFFER_SIZE: usize = 8192;
 const HTTP_JSON_REQUEST_MAX_SIZE: usize = 8192;
 
 use crate::modules::{
-    file_manager::FileManager, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,
+    file_manager::FileManager, html_form::Form, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,
 };
 
 pub type LidarJsonResponseBuffer =
@@ -83,7 +86,7 @@ pub struct HttpHandler {
 }
 
 impl HttpHandler {
-    ///⚠️ Saves the Settings in the file system
+    /// Saves the Settings in the file system
     /// 
     /// ## Return codes
     /// - 200: The Settings was saved
@@ -94,18 +97,30 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("handle_post_upload > Was called...");
+        info!("handle_post_settings > Was called...");
 
-        // TODO: Save settings
+        debug!("handle_post_settings > calling save_settings_from_connection");
+        match self.save_settings_from_connection(conn).await {
+            Ok(()) => {},
+            Err(error) => return self.handle_save_settings_error(conn, error).await
+        }
+        debug!("handle_post_settings > Settings were saved.");
 
-        conn.initiate_response(
-            200,
-            Some("OK"),
-            &[("Content-Type", "text/plain")],
-        ).await?;
+        debug!("handle_post_settings > Initialising the response...");
+        match conn.initiate_response(
+            303,
+            Some("See Other"),
+            &[("Location", "/success")],
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_post_settings > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("handle_post_settings > Response was initialized. Request completed.");
 
-        conn.write_all(b"Upload successful\n").await?;
-        Ok(())
+        return Ok(())
     }
 
     /// Get the active 3D-Model file.
@@ -175,7 +190,7 @@ impl HttpHandler {
                 }
             }
         };
-        trace!("handle_get_model3d > 3d-model was loaded. Request fullfilled.");
+        trace!("handle_get_model3d > 3d-model was loaded. Request completed.");
 
         return Ok(());
     }
@@ -219,17 +234,27 @@ impl HttpHandler {
         trace!("handle_put_model3d > Completed save_3dmodel.");
 
         debug!("handle_put_model3d > Initialising the response...");
-        conn.initiate_response(
+        match conn.initiate_response(
             204,
             Some("No Content"),
             &[],
-        ).await?;
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_put_model3d > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_put_model3d > Response was initialized. Request completed.");
 
         return Ok(())
     }
 
     /// Get the settings
+    /// 
+    /// ## Return codes
+    /// - 200: The settings were received
+    /// - 404: Settings not found
     async fn handle_api_get_settings<T, const N: usize>(
         &self,
         conn: &mut Connection<'_, T, N>,
@@ -247,14 +272,20 @@ impl HttpHandler {
         write!(content_disposition, "attachment; filename=\"{}\"", SETTINGS_JSON_FILE_PATH).unwrap();
 
         debug!("handle_api_get_settings > Initialising the response...");
-        conn.initiate_response(
+        match conn.initiate_response(
             200,
             Some("OK"),
             &[
                 ("Content-Type", "application/json"),
                 ("Content-Disposition", content_disposition.as_str())
             ],
-        ).await?;
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_api_get_settings > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_api_get_settings > Response was initialized.");
 
         debug!("handle_api_get_settings > Loads the settings from the fs...");
@@ -263,6 +294,7 @@ impl HttpHandler {
             Err(error) => {
                 match error {
                     crate::modules::file_manager::FileManagerError::Fs(error) => {
+                        // TODO: Hier muss 404 extra zurück gegeben
                         error!("handle_api_get_settings > Error while loading the settings file: {}", error);
                         return self.setup_500_code_on_connection(conn, None).await;
                     },
@@ -278,7 +310,11 @@ impl HttpHandler {
         return Ok(());
     }
 
-    ///⚠️ TODO: Programmieren
+    /// Saves the settings in the fs
+    /// 
+    /// ## Return codes
+    /// - 204: The settings were saved
+    /// - 400: The Request-Parametrs were invalid
     async fn handle_put_settings<T, const N: usize>(
         &self,
         conn: &mut Connection<'_, T, N>,
@@ -294,6 +330,20 @@ impl HttpHandler {
             Err(error) => return self.handle_save_settings_error(conn, error).await
         }
         debug!("handle_put_settings > Settings were saved. Reqeust completed.");
+
+        debug!("handle_put_settings > Initialising the response...");
+        match conn.initiate_response(
+            204,
+            Some("No Content"),
+            &[],
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_put_settings > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("handle_put_settings > Response was initialized. Request completed.");
 
         return Ok(());
     }
@@ -348,18 +398,30 @@ impl HttpHandler {
         trace!("handle_get_api_data_full > Parsing to json done.");
 
         debug!("handle_get_api_data_full > Initialising the response...");
-        conn.initiate_response(
+        match conn.initiate_response(
             200,
             Some("OK"),
             &[("Content-Type", "application/json")],
-        ).await?;
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_api_data_full > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_data_full > Response was initialized.");
 
         debug!("handle_get_api_data_full > Writing the json to the response...");
         let mut response = self.json_response_buffer.lock().await;
         response.clear();
         write!(response, "{}", json).unwrap();
-        conn.write_all(response.as_bytes()).await?;
+        match conn.write_all(response.as_bytes()).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_post_settings > Error while writing the response body: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_data_full > Text was written. Request completed.");
 
         return Ok(())
@@ -403,18 +465,30 @@ impl HttpHandler {
         trace!("handle_get_api_data > Parsing to json done.");
 
         debug!("handle_get_api_data > Initialising the response...");
-        conn.initiate_response(
+        match conn.initiate_response(
             200,
             Some("OK"),
             &[("Content-Type", "application/json")],
-        ).await?;
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_api_data > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_data > Response was initialized.");
 
         debug!("handle_get_api_data > Writing the json to the response...");
         let mut response = self.json_response_buffer.lock().await;
         response.clear();
         write!(response, "{}", json).unwrap();
-        conn.write_all(response.as_bytes()).await?;
+        match conn.write_all(response.as_bytes()).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_api_data > Error while writing the response body: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_data > Text was written. Request completed.");
 
         return Ok(());
@@ -431,12 +505,12 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("handle_get_api_data > Was called...");
+        info!("handle_get_fillstate > Was called...");
 
-        debug!("handle_get_api_data > Getting the latest lidar reading...");
+        debug!("handle_get_fillstate > Getting the latest lidar reading...");
         let mut receiver = self.reading_watch.receiver().unwrap();
         let lidar_reading = receiver.get().await;
-        trace!("handle_get_api_data > Lidar reading was received.");
+        trace!("handle_get_fillstate > Lidar reading was received.");
 
         let mut distances: [i16; 64] = [0; 64];
 
@@ -453,7 +527,7 @@ impl HttpHandler {
             distances[i] = lidar_reading.zones[i].distance_mm;
         }
 
-        debug!("handle_get_api_data > Parsing the lidar reading to json...");
+        debug!("handle_get_fillstate > Parsing the lidar reading to json...");
         let json = nojson::json(|f| {
             f.object(|f| {
                 f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
@@ -464,22 +538,34 @@ impl HttpHandler {
                 f.member("distance_mm", distances)
             })
         });
-        trace!("handle_get_api_data > Parsing to json done.");
+        trace!("handle_get_fillstate > Parsing to json done.");
 
-        debug!("handle_get_api_data > Initialising the response...");
-        conn.initiate_response(
+        debug!("handle_get_fillstate > Initialising the response...");
+        match conn.initiate_response(
             200,
             Some("OK"),
             &[("Content-Type", "application/json")],
-        ).await?;
-        trace!("handle_get_api_data > Response was initialized.");
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_fillstate > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("handle_get_fillstate > Response was initialized.");
 
-        debug!("handle_not_found > Writing the json to the response...");
+        debug!("handle_get_fillstate > Writing the json to the response...");
         let mut response = self.json_response_buffer.lock().await;
         response.clear();
         write!(response, "{}", json).unwrap();
-        conn.write_all(response.as_bytes()).await?;
-        trace!("handle_not_found > Text was written. Request completed.");
+        match conn.write_all(response.as_bytes()).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_fillstate > Error while writing the response body: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("handle_get_fillstate > Text was written. Request completed.");
 
         return Ok(());
     }
@@ -522,11 +608,17 @@ impl HttpHandler {
         trace!("handle_get_api_storage_info > Json parse is complete.");
 
         debug!("handle_get_api_storage_info > Initialising the response...");
-        conn.initiate_response(
+        match conn.initiate_response(
             200,
             Some("OK"),
             &[("Content-Type", "application/json")],
-        ).await?;
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_api_storage_info > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_storage_info > Response was initialized.");
 
         let mut response = self.json_response_buffer.lock().await;
@@ -534,7 +626,13 @@ impl HttpHandler {
         write!(response, "{}", json).unwrap();
 
         debug!("handle_get_api_storage_info > Writing the json to the response...");
-        conn.write_all(response.as_bytes()).await?;
+        match conn.write_all(response.as_bytes()).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_get_api_storage_info > Error while writing the response body: {}", error);
+                return Err(error);
+            }
+        };
         trace!("handle_get_api_storage_info > Json was written. Request completed.");
 
         return Ok(())
@@ -566,7 +664,50 @@ impl HttpHandler {
 
         let content_type_header = content_type_header.as_deref();
 
+        let settings: Settings;
+
         if content_type_header == Some("application/json") {
+            debug!("save_settings_from_connection > Parsing the json from the request...");
+            let parse_result = parse_json_from_reader::<HTTP_JSON_REQUEST_MAX_SIZE, _, _, _>(
+                conn,
+                parse_settings_from_json,
+            ).await;
+
+            settings = match parse_result {
+                Ok(settings) => settings,
+                Err(JsonParseError::BodyTooLong) => {
+                    return Err(SaveSettingsError::BodyTooLong { max_length: HTTP_JSON_REQUEST_MAX_SIZE })
+                }
+                Err(error) => {
+                    return Err(SaveSettingsError::JsonParseError { error })
+                }
+            };
+            trace!("save_settings_from_connection > The settings were parsed.");
+        }
+        else if content_type_header == Some("application/x-www-form-urlencoded") {
+            let parse_result = parse_www__form_urlencoded_from_reader::<HTTP_JSON_REQUEST_MAX_SIZE, _, _, _>(
+                conn,
+                parse_settings_from_www_form,
+            ).await;
+
+            settings = match parse_result {
+                Ok(settings) => settings,
+                Err(WwwFormParseError::BodyTooLong) => {
+                    return Err(SaveSettingsError::BodyTooLong { max_length: HTTP_JSON_REQUEST_MAX_SIZE })
+                }
+                Err(WwwFormParseError::ReaderReadFailed) => {
+                    return Err(SaveSettingsError::JsonParseError { error: JsonParseError::ReaderReadFailed })
+                }
+                Err(WwwFormParseError::Utf8ConvertError { error }) => {
+                    return Err(SaveSettingsError::JsonParseError { error: JsonParseError::Utf8ConvertError { error } })
+                }
+                Err(WwwFormParseError::JsonParseError { error }) => {
+                    return Err(SaveSettingsError::JsonParseError { error: JsonParseError::JsonParseError { error } })
+                }
+            };
+            trace!("save_settings_from_connection > The settings were parsed from the form body.");
+        }
+        else {
             let mut expected_type = heapless::String::new();
             match expected_type.push_str("application/json") {
                 Err(error) => return Err(SaveSettingsError::ContentCapacityError { error }),
@@ -588,23 +729,6 @@ impl HttpHandler {
         }
         trace!("save_settings_from_connection > The \"Content-Type\" Header was correct.");
 
-        debug!("save_settings_from_connection > Parsing the json from the request...");
-        let parse_result = parse_json_from_reader::<HTTP_JSON_REQUEST_MAX_SIZE, _, _, _>(
-            conn,
-            parse_settings,
-        ).await;
-
-        let settings = match parse_result {
-            Ok(settings) => settings,
-            Err(JsonParseError::BodyTooLong) => {
-                return Err(SaveSettingsError::BodyTooLong { max_length: HTTP_JSON_REQUEST_MAX_SIZE })
-            }
-            Err(error) => {
-                return Err(SaveSettingsError::JsonParseError { error })
-            }
-        };
-        trace!("save_settings_from_connection > The settings were parsed.");
-
         debug!("save_settings_from_connection > Parsing settings to json...");
         let json = nojson::json(|f| {
             f.object(|f| {
@@ -624,7 +748,7 @@ impl HttpHandler {
         trace!("save_settings_from_connection > Filesystem lock was aquired.");
 
         debug!("save_settings_from_connection > Trying to open the file \"{}\" ...", path);
-        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, littlefs_rust::OpenFlags::READ) {
+        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNC) {
             Ok(file) => file,
             Err(error) => {
                 return Err(SaveSettingsError::OpenFileError { error })
@@ -1007,6 +1131,39 @@ impl HttpHandler {
 
         return Ok(());
     }
+
+    /// Setts the http code 500 on the connection and log that
+    /// a timeout happend
+    /// 
+    /// ## Parameters 
+    /// - conn: The connection to write the code to
+    async fn setup_500_request_timeout<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+        path: &str,
+        method_type: &str,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        debug!("setup_500_request_timeout > Was called...");
+
+        warn!("setup_500_request_timeout > Option \"{} {}\" ran into a timeout. Returning http code 500...", method_type, path);
+        // match conn.initiate_response(
+        //     500,
+        //     Some("Bad Request"),
+        //     &[("Content-Type", "application/json")],
+        // ).await {
+        //     Ok(()) => {},
+        //     Err(error) => {
+        //         error!("setup_500_request_timeout > Error while initializing the response: {}", error);
+        //         return Err(error);
+        //     }
+        // };
+        trace!("setup_500_request_timeout > Response was initialized.");
+
+        return Ok(());
+    }
 }
 
 impl Handler for HttpHandler {
@@ -1023,51 +1180,85 @@ impl Handler for HttpHandler {
     where
         T: Read + Write,
     {
-        let headers = conn.headers()?;
+        // Copy the routing information out of the borrowed headers.
+        let (method, path) = {
+            let headers = conn.headers()?;
 
-        trace!("Received web request: {:?} {}", headers.method, headers.path);
+            let method = headers.method;
+            let mut path: heapless::String<128> = heapless::String::new();
 
-        match (headers.method, headers.path) {
-            (Method::Get, "/") => self.serve_static_content(
-                conn,
-                "text/html; charset=utf-8",
-                HTTP_INDEX_HTML
-            ).await,
-            (Method::Get, "/settings") => self.serve_static_content(
-                conn,
-                "text/html; charset=utf-8",
-                HTTP_SETTINGS_HTML
-            ).await,
-            (Method::Post, "/settings") => self.handle_post_settings(conn).await,
-            (Method::Get, "/api/settings") => self.handle_api_get_settings(conn).await,
-            (Method::Put, "/api/settings") => self.handle_put_settings(conn).await,
-            (Method::Get, "/model3d") => self.handle_get_model3d(conn).await,
-            (Method::Put, "/model3d") => self.handle_put_model3d(conn).await,
-            (Method::Get, "/swagger") => self.serve_static_content(
-                conn,
-                "text/html; charset=utf-8",
-                HTTP_SWAGGER_HTML
-            ).await,
-            (Method::Get, "/swagger/openapi.json") => self.serve_static_content(
-                conn,
-                "application/json; charset=utf-8",
-                HTTP_OPENAPI_JSON
-            ).await,
-            (Method::Get, "/assets/base_style.css") => self.serve_static_content(
-                conn,
-                "text/css",
-                HTTP_BASE_STYLE_CSS
-            ).await,
-            (Method::Get, "/favicon.ico") => self.serve_static_content(
-                conn,
-                "image/x-icon",
-                HTTP_FAV_ICON
-            ).await,
-            (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
-            (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,
-            (Method::Get, "/api/storage") => self.handle_get_api_storage_info(conn).await,
-            (Method::Get, "/api/file-system-stats") => self.handle_get_api_storage_info(conn).await,
-            _ => self.handle_not_found(conn).await,
+            path.push_str(headers.path).unwrap();
+
+            (method, path)
+        };
+
+        trace!("Received web request: {:?} {}", method, path);
+
+        let future = with_timeout(
+            Duration::from_secs(15),
+            async {
+                match (method, path.as_str()) {
+                    (Method::Get, "/") => self.serve_static_content(
+                        conn,
+                        "text/html; charset=utf-8",
+                        HTTP_INDEX_HTML
+                    ).await,
+                    (Method::Get, "/settings") => self.serve_static_content(
+                        conn,
+                        "text/html; charset=utf-8",
+                        HTTP_SETTINGS_HTML
+                    ).await,
+                    (Method::Post, "/settings") => self.handle_post_settings(conn).await,
+                    (Method::Get, "/success") => self.serve_static_content(
+                        conn,
+                        "text/html; charset=utf-8",
+                        HTTP_SETTINGS_SAVE_SUCCESS_HTML
+                    ).await,
+                    (Method::Get, "/api/settings") => self.handle_api_get_settings(conn).await,
+                    (Method::Put, "/api/settings") => self.handle_put_settings(conn).await,
+                    (Method::Get, "/model3d") => self.handle_get_model3d(conn).await,
+                    (Method::Put, "/model3d") => self.handle_put_model3d(conn).await,
+                    (Method::Get, "/swagger") => self.serve_static_content(
+                        conn,
+                        "text/html; charset=utf-8",
+                        HTTP_SWAGGER_HTML
+                    ).await,
+                    (Method::Get, "/swagger/openapi.json") => self.serve_static_content(
+                        conn,
+                        "application/json; charset=utf-8",
+                        HTTP_OPENAPI_JSON
+                    ).await,
+                    (Method::Get, "/assets/base_style.css") => self.serve_static_content(
+                        conn,
+                        "text/css",
+                        HTTP_BASE_STYLE_CSS
+                    ).await,
+                    (Method::Get, "/favicon.ico") => self.serve_static_content(
+                        conn,
+                        "image/x-icon",
+                        HTTP_FAV_ICON
+                    ).await,
+                    (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
+                    (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,
+                    (Method::Get, "/api/storage") => self.handle_get_api_storage_info(conn).await,
+                    (Method::Get, "/api/file-system-stats") => self.handle_get_api_storage_info(conn).await,
+                    _ => self.handle_not_found(conn).await,
+                }
+            }
+        );
+
+        let method_string = match method {
+            Method::Get => "GET",
+            Method::Put => "PUT",
+            Method::Post => "POST",
+            Method::Delete => "DELETE",
+            Method::Patch => "PATCH",
+            _ => "other"
+        };
+
+        match future.await {
+            Ok(value) => value,
+            Err(_error) => self.setup_500_request_timeout(conn, method_string, &path).await
         }
     }
 }
@@ -1113,7 +1304,7 @@ struct Settings {
 /// 
 /// ## Parameters
 /// - value: The json to parse
-fn parse_settings<'text, 'raw>(
+fn parse_settings_from_json<'text, 'raw>(
     value: nojson::RawJsonValue<'text, 'raw>,
 ) -> Result<Settings, nojson::JsonParseError> {
     let main_mesh_name: &str = value.to_member("main_mesh_name")?.required()?.try_into()?;
@@ -1129,8 +1320,57 @@ fn parse_settings<'text, 'raw>(
     })
 }
 
+/// Parses the settings from the www-form
+/// 
+/// ## Parameters
+/// - value: The json to parse
+fn parse_settings_from_www_form(
+    form: Form,
+) -> Result<Settings, WwwFormParseError> {
+    let mut main_mesh_name: Option<String> = None;
+    let mut lidar_camera_name: Option<String> = None;
+    let mut wifi_ssid: Option<String> = None;
+    let mut wifi_password: Option<String> = None;
+
+    for (key, value) in form {
+        let mut key_string = heapless::String::<64>::new();
+        let mut value_string = heapless::String::<128>::new();
+
+        for byte in key {
+            key_string.push(char::from(byte)).unwrap();
+        }
+
+        for byte in value {
+            value_string.push(char::from(byte)).unwrap();
+        }
+
+        match key_string.as_str() {
+            "main_mesh_name" => main_mesh_name = Some(value_string.to_string()),
+            "lidar_camera_name" => lidar_camera_name = Some(value_string.to_string()),
+            "wifi_ssid" => wifi_ssid = Some(value_string.to_string()),
+            "wifi_password" => wifi_password = Some(value_string.to_string()),
+            _ => {}
+        }
+    }
+
+    Ok(Settings {
+        main_mesh_name: main_mesh_name.unwrap_or_default(),
+        lidar_camera_name: lidar_camera_name.unwrap_or_default(),
+        wifi_ssid: wifi_ssid.unwrap_or_default(),
+        wifi_password: wifi_password.unwrap_or_default(),
+    })
+}
+
 #[derive(Debug)]
 enum JsonParseError {
+    BodyTooLong,
+    ReaderReadFailed,
+    Utf8ConvertError { error: core::str::Utf8Error },
+    JsonParseError { error: nojson::JsonParseError }
+}
+
+#[derive(Debug)]
+enum WwwFormParseError {
     BodyTooLong,
     ReaderReadFailed,
     Utf8ConvertError { error: core::str::Utf8Error },
@@ -1179,7 +1419,7 @@ where
     }
 
     trace!("parse_json_from_reader > Creating the string from the bytes...");
-    let json = match core::str::from_utf8(&buffer[..len]) {
+    let json_string = match core::str::from_utf8(&buffer[..len]) {
         Err(error) => {
             error!("handle_put_settings > Error while converting the body bytes to utf8 string: {:?}", error);
             return Err(JsonParseError::Utf8ConvertError { error });
@@ -1189,14 +1429,14 @@ where
     trace!("parse_json_from_reader > String created.");
 
     trace!("parse_json_from_reader > Parsing the string into raw json...");
-    let raw = match nojson::RawJson::parse(json) {
+    let raw = match nojson::RawJson::parse(json_string) {
         Ok(value) => value,
         Err(error) => {
             error!("handle_put_settings > Error while parsing the json: {:?}", error);
             return Err(JsonParseError::JsonParseError { error });
         }
     };
-    trace!("parse_json_from_reader > String was parsed.");
+    trace!("parse_json_from_reader > String was parsed to json.");
 
     trace!("parse_json_from_reader > Parsing the raw json to the traget object...");
     let parsed_object = match callback(raw.value()) {
@@ -1207,6 +1447,67 @@ where
         }
     };
     trace!("parse_json_from_reader > Parsing to the target object done.");
+
+    return Ok(parsed_object);
+}
+
+/// Parses the www-form-urlencoded from the async reader into the target object
+/// 
+/// ## Parameters
+/// - reader: The async reader to read from
+/// - callback: The Function for parsing the www-form-urlencoded to the targetobject
+async fn parse_www__form_urlencoded_from_reader<const BUFFER_SIZE: usize, R, TResult, B>(
+    reader: &mut R,
+    callback: B,
+) -> Result<TResult, WwwFormParseError>
+where
+    R: Read,
+    B: FnOnce(
+        Form,
+    ) -> Result<TResult, WwwFormParseError>,
+{
+    debug!("parse_www__form_urlencoded_from_reader > Was called...");
+
+    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut len = 0;
+
+    trace!("parse_www__form_urlencoded_from_reader > Reading the reader async...");
+    while len < buffer.len() {
+        let read_bytes = reader.read(&mut buffer[len..]).await
+            .map_err(|_| WwwFormParseError::ReaderReadFailed)?;
+
+        if read_bytes == 0 {
+            break;
+        }
+        len += read_bytes;
+    }
+    trace!("parse_www__form_urlencoded_from_reader > Reading done.");
+
+    if len == BUFFER_SIZE {
+        let mut extra_byte = [0u8; 1];
+        if reader.read(&mut extra_byte).await
+            .map_err(|_| WwwFormParseError::ReaderReadFailed)? > 0
+        {
+            return Err(WwwFormParseError::BodyTooLong);
+        }
+    }
+
+    trace!("parse_www__form_urlencoded_from_reader > Creating the string from the bytes...");
+    let body_string = match core::str::from_utf8(&buffer[..len]) {
+        Err(error) => {
+            error!("parse_www__form_urlencoded_from_reader > Error while converting the body bytes to utf8 string: {:?}", error);
+            return Err(WwwFormParseError::Utf8ConvertError { error });
+        }
+        Ok(string) => string
+    };
+    trace!("parse_www__form_urlencoded_from_reader > String created.");
+
+    trace!("parse_www__form_urlencoded_from_reader > Parsing the from in the body...");
+    let parsed_object = match callback(Form::new(body_string)) {
+        Ok(value) => value,
+        Err(error) => return Err(error)
+    };
+    trace!("parse_www__form_urlencoded_from_reader > Body was parsed.");
 
     return Ok(parsed_object);
 }

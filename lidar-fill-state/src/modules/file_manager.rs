@@ -8,7 +8,7 @@ use embassy_sync::{
     blocking_mutex::raw::{NoopRawMutex}, mutex::{Mutex},
 };
 use crate::modules::{
-    glb_reader::parse_file_data, little_fs_storage::LittleFsStorage,
+    little_fs_storage::LittleFsStorage,
 };
 
 /// The Path of the 3D-Model in the filesystem
@@ -174,7 +174,7 @@ impl FileManager {
         trace!("save_file > Filesystem lock was aquired.");
 
         debug!("save_file > Trying to open the file \"{}\" ...", path);
-        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::READ) {
+        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNC) {
             Ok(file) => file,
             Err(error) => return Err(FileManagerError::Fs(error))
         };
