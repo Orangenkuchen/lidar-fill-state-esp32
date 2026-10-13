@@ -37,44 +37,66 @@
         </label>
         <input type="submit" value="Speichern" />
     </form>
-    <form class="Thin Border">
+    <form id="model-upload" class="Thin Border">
         <label>
             <p>3D-Model</p>
             <div class="InputContainer">
-                <input id="file" required name="3d_model" type="file" accept="model/gltf-binary" />
+                <input id="model-file" required name="3d_model" type="file" accept="model/gltf-binary" />
             </div>
         </label>
-        <input type="submit" value="Speichern" />
+        <input id="model-upload-submit" type="submit" value="Speichern" />
+        <progress id="model-upload-progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress>
     </form>
 
     <p id="status"></p>
 
-    <a href="./file">
-        <button>Download</button>
+    <a href="/api/model3d">
+        <button>Download 3D-Model</button>
     </a>
-
     <script>
-        async function upload() {
-            const input = document.getElementById("file");
-            const status = document.getElementById("status");
+        const uploadForm = document.getElementById("model-upload");
+        const fileInput = document.getElementById("model-file");
+        const progress = document.getElementById("model-upload-progress");
+        const submitButton = document.getElementById("model-upload-submit");
+        const status = document.getElementById("status");
 
-            if (!input.files.length) {
-                status.textContent = "Bitte eine Datei auswählen.";
-                return;
-            }
+        uploadForm.addEventListener("submit", (event) => {
+            event.preventDefault();
 
-            status.textContent = "Upload läuft...";
+            const file = fileInput.files[0];
+            if (!file) return;
 
-            const response = await fetch("/settings", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/octet-stream"
-                },
-                body: input.files[0],
+            const request = new XMLHttpRequest();
+            request.open("PUT", "/api/model3d");
+            request.setRequestHeader("Content-Type", "model/gltf-binary");
+            progress.value = 0;
+            status.textContent = "Upload wird vorbereitet...";
+            submitButton.disabled = true;
+
+            request.upload.addEventListener("progress", (uploadEvent) => {
+                if (!uploadEvent.lengthComputable) return;
+
+                progress.value = Math.round((uploadEvent.loaded / uploadEvent.total) * 100);
+                status.textContent = `Upload: ${progress.value}%`;
             });
 
-            status.textContent = await response.text();
-        }
+            request.addEventListener("load", () => {
+                if (request.status >= 200 && request.status < 300) {
+                    progress.value = 0;
+                    status.textContent = "3D-Model erfolgreich hochgeladen.";
+                } else {
+                    status.textContent = `Upload fehlgeschlagen (HTTP ${request.status}).`;
+                }
+                submitButton.disabled = false;
+            });
+
+            request.addEventListener("error", () => {
+                status.textContent = "Upload fehlgeschlagen. Verbindung prüfen und erneut versuchen.";
+                submitButton.disabled = false;
+            });
+
+            request.send(file);
+        });
     </script>
 </body>
 </html>

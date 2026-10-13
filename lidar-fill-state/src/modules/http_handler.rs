@@ -44,6 +44,8 @@ const HTTP_INDEX_HTML: &'static [u8] = include_bytes!("../../../web/index.html")
 const HTTP_SETTINGS_HTML: &'static [u8] = include_bytes!("../../../web/settings.html");
 /// The base css of the web pages of the webserver
 const HTTP_BASE_STYLE_CSS: &'static [u8] = include_bytes!("../../../web/assets/base_style.css");
+/// The base css of the web pages of the webserver
+const HTTP_COG_ICON: &'static [u8] = include_bytes!("../../../web/assets/cog_icon.svg");
 /// The Fav-Icon of the website
 const HTTP_FAV_ICON: &'static [u8] = include_bytes!("../../../web/favicon.ico");
 /// The html of the swagger page
@@ -1140,27 +1142,25 @@ impl HttpHandler {
     async fn setup_500_request_timeout<T, const N: usize>(
         &self,
         conn: &mut Connection<'_, T, N>,
-        path: &str,
         method_type: &str,
+        path: &str,
     ) -> Result<(), edge_http::io::Error<T::Error>>
     where
         T: Read + Write,
     {
         debug!("setup_500_request_timeout > Was called...");
 
-        warn!("setup_500_request_timeout > Option \"{} {}\" ran into a timeout. Returning http code 500...", method_type, path);
-        // match conn.initiate_response(
-        //     500,
-        //     Some("Bad Request"),
-        //     &[("Content-Type", "application/json")],
-        // ).await {
-        //     Ok(()) => {},
-        //     Err(error) => {
-        //         error!("setup_500_request_timeout > Error while initializing the response: {}", error);
-        //         return Err(error);
-        //     }
-        // };
-        trace!("setup_500_request_timeout > Response was initialized.");
+        warn!("setup_500_request_timeout > Request \"{} {}\" timed out. Returning HTTP 504...", method_type, path);
+        conn.initiate_response(
+            504,
+            Some("Gateway Timeout"),
+            &[
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Content-Length", "18"),
+            ],
+        ).await?;
+        conn.write_all(b"Request timed out\n").await?;
+        trace!("setup_500_request_timeout > Timeout response was sent.");
 
         return Ok(());
     }
@@ -1216,8 +1216,8 @@ impl Handler for HttpHandler {
                     ).await,
                     (Method::Get, "/api/settings") => self.handle_api_get_settings(conn).await,
                     (Method::Put, "/api/settings") => self.handle_put_settings(conn).await,
-                    (Method::Get, "/model3d") => self.handle_get_model3d(conn).await,
-                    (Method::Put, "/model3d") => self.handle_put_model3d(conn).await,
+                    (Method::Get, "/api/model3d") => self.handle_get_model3d(conn).await,
+                    (Method::Put, "/api/model3d") => self.handle_put_model3d(conn).await,
                     (Method::Get, "/swagger") => self.serve_static_content(
                         conn,
                         "text/html; charset=utf-8",
@@ -1232,6 +1232,11 @@ impl Handler for HttpHandler {
                         conn,
                         "text/css",
                         HTTP_BASE_STYLE_CSS
+                    ).await,
+                    (Method::Get, "/assets/cog_icon.svg") => self.serve_static_content(
+                        conn,
+                        "image/svg+xml",
+                        HTTP_COG_ICON
                     ).await,
                     (Method::Get, "/favicon.ico") => self.serve_static_content(
                         conn,

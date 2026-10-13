@@ -173,8 +173,14 @@ impl FileManager {
         let fs = self.filesystem.lock().await;
         trace!("save_file > Filesystem lock was aquired.");
 
+        debug!("save_file > Removing the existing file, if present...");
+        match fs.remove(path) {
+            Ok(()) | Err(littlefs_rust::Error::NoEntry) => {},
+            Err(error) => return Err(FileManagerError::Fs(error))
+        }
+
         debug!("save_file > Trying to open the file \"{}\" ...", path);
-        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNC) {
+        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::WRITE | OpenFlags::CREATE) {
             Ok(file) => file,
             Err(error) => return Err(FileManagerError::Fs(error))
         };
@@ -199,6 +205,11 @@ impl FileManager {
             };
         }
         trace!("save_file > Writing of the file is done.");
+
+        match file.close() {
+            Ok(()) => {},
+            Err(error) => return Err(FileManagerError::Fs(error))
+        }
 
         return Ok(());
     }
