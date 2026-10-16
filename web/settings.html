@@ -1,102 +1,115 @@
 <!doctype html>
 <html lang="de">
-<head>
-    <meta charset="utf-8">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Ubuntu&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/assets/base_style.css">
-    <title>Einstellungen</title>
-</head>
-<body>
-    <h1>Einstellungen</h1>
-    <form action="/settings" method="post" class="Thin Border">
-        <label>
-            <p>Wifi-Name</p>
-            <div class="InputContainer">
-                <input name="wifi_name" required type="text" />
-            </div>
-        </label>
-        <label>
-            <p>Wifi-Passwort</p>
-            <div class="InputContainer">
-                <input name="wifi_password" required type="password" />
-            </div>
-        </label>
-        <label>
-            <p>Name vom Container-Mesh im 3D-Model</p>
-            <div class="InputContainer">
-                <input name="main_mesh_name" required type="text" />
-            </div>
-        </label>
-        <label>
-            <p>Name von Lidar-Camera im 3D-Model</p>
-            <div class="InputContainer">
-                <input name="lidar_camera_name" required type="text" />
-            </div>
-        </label>
-        <input type="submit" value="Speichern" />
-    </form>
-    <form id="model-upload" class="Thin Border">
-        <label>
-            <p>3D-Model</p>
-            <div class="InputContainer">
-                <input id="model-file" required name="3d_model" type="file" accept="model/gltf-binary" />
-            </div>
-        </label>
-        <input id="model-upload-submit" type="submit" value="Speichern" />
-        <progress id="model-upload-progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress>
-    </form>
+    <head>
+        <meta charset="utf-8">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Ubuntu&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="/assets/base_style.css">
+        <title>Einstellungen</title>
+    </head>
+    <body class="NoMargin">
+        <div class="MainHeader">
+            <a class="Title" href="/">
+                <img src="/favicon.ico" alt="Einstellungen">
+                <div class="Title">Lidar-Fill-State</div>
+            </a>
+            <div>Einstellungen</div>
+            <div class="Spacer"></div>
+            <a class="SettingsButton" href="/settings">
+                <img class="Icon HoverEffect" src="/assets/cog_icon.svg" alt="Einstellungen">
+            </a>
+        </div>
+        <div class="MainContent">
+            <h1>Einstellungen</h1>
+            <form action="/settings" method="post" class="Thin Border">
+                <label>
+                    <p>Wifi-Name</p>
+                    <div class="InputContainer">
+                        <input name="wifi_name" required type="text" />
+                    </div>
+                </label>
+                <label>
+                    <p>Wifi-Passwort</p>
+                    <div class="InputContainer">
+                        <input name="wifi_password" required type="password" />
+                    </div>
+                </label>
+                <label>
+                    <p>Name vom Container-Mesh im 3D-Model</p>
+                    <div class="InputContainer">
+                        <input name="main_mesh_name" required type="text" />
+                    </div>
+                </label>
+                <label>
+                    <p>Name von Lidar-Camera im 3D-Model</p>
+                    <div class="InputContainer">
+                        <input name="lidar_camera_name" required type="text" />
+                    </div>
+                </label>
+                <input type="submit" value="Speichern" />
+            </form>
+            <form id="model-upload" class="Thin Border">
+                <label>
+                    <p>3D-Model</p>
+                    <div class="InputContainer">
+                        <input id="model-file" required name="3d_model" type="file" accept="model/gltf-binary" />
+                    </div>
+                </label>
+                <input id="model-upload-submit" type="submit" value="Speichern" />
+                <progress id="model-upload-progress" max="100" value="0" aria-label="Upload-Fortschritt"></progress>
+            </form>
 
-    <p id="status"></p>
+            <p id="status"></p>
 
-    <a href="/api/model3d">
-        <button>Download 3D-Model</button>
-    </a>
-    <script>
-        const uploadForm = document.getElementById("model-upload");
-        const fileInput = document.getElementById("model-file");
-        const progress = document.getElementById("model-upload-progress");
-        const submitButton = document.getElementById("model-upload-submit");
-        const status = document.getElementById("status");
+            <a href="/api/model3d">
+                <button>Download 3D-Model</button>
+            </a>
+            <script>
+                const uploadForm = document.getElementById("model-upload");
+                const fileInput = document.getElementById("model-file");
+                const progress = document.getElementById("model-upload-progress");
+                const submitButton = document.getElementById("model-upload-submit");
+                const status = document.getElementById("status");
 
-        uploadForm.addEventListener("submit", (event) => {
-            event.preventDefault();
+                uploadForm.addEventListener("submit", (event) => {
+                    event.preventDefault();
 
-            const file = fileInput.files[0];
-            if (!file) return;
+                    const file = fileInput.files[0];
+                    if (!file) return;
 
-            const request = new XMLHttpRequest();
-            request.open("PUT", "/api/model3d");
-            request.setRequestHeader("Content-Type", "model/gltf-binary");
-            progress.value = 0;
-            status.textContent = "Upload wird vorbereitet...";
-            submitButton.disabled = true;
-
-            request.upload.addEventListener("progress", (uploadEvent) => {
-                if (!uploadEvent.lengthComputable) return;
-
-                progress.value = Math.round((uploadEvent.loaded / uploadEvent.total) * 100);
-                status.textContent = `Upload: ${progress.value}%`;
-            });
-
-            request.addEventListener("load", () => {
-                if (request.status >= 200 && request.status < 300) {
+                    const request = new XMLHttpRequest();
+                    request.open("PUT", "/api/model3d");
+                    request.setRequestHeader("Content-Type", "model/gltf-binary");
                     progress.value = 0;
-                    status.textContent = "3D-Model erfolgreich hochgeladen.";
-                } else {
-                    status.textContent = `Upload fehlgeschlagen (HTTP ${request.status}).`;
-                }
-                submitButton.disabled = false;
-            });
+                    status.textContent = "Upload wird vorbereitet...";
+                    submitButton.disabled = true;
 
-            request.addEventListener("error", () => {
-                status.textContent = "Upload fehlgeschlagen. Verbindung prüfen und erneut versuchen.";
-                submitButton.disabled = false;
-            });
+                    request.upload.addEventListener("progress", (uploadEvent) => {
+                        if (!uploadEvent.lengthComputable) return;
 
-            request.send(file);
-        });
-    </script>
-</body>
+                        progress.value = Math.round((uploadEvent.loaded / uploadEvent.total) * 100);
+                        status.textContent = `Upload: ${progress.value}%`;
+                    });
+
+                    request.addEventListener("load", () => {
+                        if (request.status >= 200 && request.status < 300) {
+                            progress.value = 0;
+                            status.textContent = "3D-Model erfolgreich hochgeladen.";
+                        } else {
+                            status.textContent = `Upload fehlgeschlagen (HTTP ${request.status}).`;
+                        }
+                        submitButton.disabled = false;
+                    });
+
+                    request.addEventListener("error", () => {
+                        status.textContent = "Upload fehlgeschlagen. Verbindung prüfen und erneut versuchen.";
+                        submitButton.disabled = false;
+                    });
+
+                    request.send(file);
+                });
+            </script>
+        </div>
+    </body>
 </html>

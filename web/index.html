@@ -24,8 +24,9 @@
                 <img src="/favicon.ico" alt="Einstellungen">
                 <div class="Title">Lidar-Fill-State</div>
             </a>
+            <div>Dashboard</div>
             <div class="Spacer"></div>
-            <a class="SettingsButton" href="/settings.html">
+            <a class="SettingsButton" href="/settings">
                 <img class="Icon HoverEffect" src="/assets/cog_icon.svg" alt="Einstellungen">
             </a>
         </div>
@@ -63,13 +64,21 @@
             renderer.outputColorSpace = THREE.SRGBColorSpace;
             scene.add(new THREE.HemisphereLight(0xffffff, 0x58645e, 2));
 
+            const light = new THREE.AmbientLight( 0x404040, 0.3 ); // soft white light
+            scene.add( light );
+            window.bla = light;
+
             const keyLight = new THREE.DirectionalLight(0xffffff, 3);
             keyLight.position.set(4, 6, 5);
             scene.add(keyLight);
+            const helper = new THREE.DirectionalLightHelper( keyLight, 5 );
+            scene.add( helper );
 
             const fillLight = new THREE.DirectionalLight(0xffffff, 1.5);
             fillLight.position.set(-4, 2, -3);
             scene.add(fillLight);
+            const helper2 = new THREE.DirectionalLightHelper( fillLight, 5 );
+            scene.add( helper2 );
 
             const resizeViewer = () => {
                 const { width, height } = viewer.getBoundingClientRect();
@@ -82,6 +91,8 @@
                 camera.updateProjectionMatrix();
             };
 
+            console.log(THREE.REVISION);
+
             new ResizeObserver(resizeViewer).observe(viewer);
             resizeViewer();
 
@@ -89,6 +100,13 @@
                 "/api/model3d",
                 (gltf) => {
                     model = gltf.scene;
+
+                    const sphereSize = 1;
+                    const pointLightHelper = new THREE.PointLightHelper( model.children[1], sphereSize );
+                    scene.add( pointLightHelper );
+
+                    window.foo = model.children[1];
+
                     model.traverse((object) => {
                         if (!object.isMesh) return;
 
@@ -98,6 +116,30 @@
                         for (const material of materials) {
                             material.side = THREE.FrontSide;
                             material.needsUpdate = true;
+                        }
+
+                        for (const material of materials) {
+                            console.log("Material:", material.name);
+                            console.log("AO map:", material.aoMap);
+                            console.log("AO intensity:", material.aoMapIntensity);
+
+                            console.log("UV:", object.geometry.attributes.uv);
+                            console.log("UV1:", object.geometry.attributes.uv1);
+                            console.log("UV2:", object.geometry.attributes.uv2);
+
+                            if (material.aoMap) {
+                                console.log("AO channel:", material.aoMap.channel);
+                                console.log("AO image:", material.aoMap.image);
+                                console.log("AO source data:", material.aoMap.source?.data);
+                                console.log("UV1 exists:", !!object.geometry.attributes.uv1);
+                            }
+
+                            if (material.aoMap) {
+                                material.aoMap.channel = 1;
+                                material.aoMapIntensity = 1.0;
+                                material.needsUpdate = true;
+                                material.aoMapIntensity = 3.0;
+                            }
                         }
                     });
 
