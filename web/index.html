@@ -24,9 +24,9 @@
         <div class="MainHeader">
             <a class="Title" href="/">
                 <img src="/favicon.ico" alt="Einstellungen">
-                <div class="Title">Lidar-Fill-State</div>
+                <div class="Text">Lidar-Fill-State</div>
             </a>
-            <div>Dashboard</div>
+            <div class="Breadcrumb">Dashboard</div>
             <div class="Spacer"></div>
             <a class="SettingsButton" href="/settings">
                 <img class="Icon HoverEffect" src="/assets/cog_icon.svg" alt="Einstellungen">
@@ -34,12 +34,19 @@
         </div>
         <div class="MainContent">
             <div class="StatsContainer">
-                <div class="StatsBox">
-                    <div class="Value">13,5 m³</div>
+                <div class="StatsBox Volume">
+                    <div class="CenterText">
+                        <span class="Value">99</span>
+                        <span> m³</span>
+                    </div>
                     <div class="Subtext">Füllmasse</div>
                     <div class="Footer">
                         <div></div>
-                        <div>Max: 15 m³</div>
+                        <div>
+                            <span>Max:</span>
+                            <span class="MaxValue">0</span>
+                            <span> m³</span>
+                        </div>
                     </div>
                 </div>
                 <div class="StatsBox">Test</div>

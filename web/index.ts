@@ -368,6 +368,92 @@ class MainHandler
     }
     // #endregion
 
+    // #region LogActiveCameraPosition
+    /**
+     * Logs the position of the active camera in the console
+     */
+    public LogActiveCameraPosition()
+    {
+        if (this.activeCamera == null)
+        {
+            console.info("3D-Model: Active Camera is null.");
+        }
+        else
+        {
+            console.info(
+                "3D-Model: Active Camera-Position: x=%f; y=%f; z=%f; Camera-Rotations: x=%f; y=%f; z=%f;",
+                this.activeCamera.position.x,
+                this.activeCamera.position.y,
+                this.activeCamera.position.z,
+                this.activeCamera.rotation.x,
+                this.activeCamera.rotation.y,
+                this.activeCamera.rotation.z
+            );
+        }
+    }
+    // #endregion
+
+    // #region CalculateMainContainerVolume
+    /**
+     * Calculates the Volume of the MainContainer
+     * 
+     * @returns Returns the Volume
+     */
+    public CalculateMainContainerVolume(): number
+    {
+        if (this.mainContainerMesh == null)
+        {
+            return 0;
+        }
+
+        return this.CalculateVolumeOfMesh(this.mainContainerMesh);
+    }
+    // #endregion
+
+    // #region CalculateVolumeOfMesh
+    /**
+     * Calcaluates the volume of the mesh
+     * 
+     * @param mesh The mesh to calculate
+     * @returns Returns the volume
+     */
+    private CalculateVolumeOfMesh(mesh: THREE.Mesh): number
+    {
+        const geometry = mesh.geometry;
+        const position = geometry.attributes["position"];
+        const index = geometry.index;
+
+        if (position === undefined)
+        {
+            return 0;
+        }
+
+        let volume = 0;
+
+        const a = new THREE.Vector3();
+        const b = new THREE.Vector3();
+        const c = new THREE.Vector3();
+
+        const triangleCount = index
+            ? index.count / 3
+            : position.count / 3;
+
+        for (let i = 0; i < triangleCount; i++) {
+            const i0 = index ? index.getX(i * 3) : i * 3;
+            const i1 = index ? index.getX(i * 3 + 1) : i * 3 + 1;
+            const i2 = index ? index.getX(i * 3 + 2) : i * 3 + 2;
+
+            a.fromBufferAttribute(position, i0);
+            b.fromBufferAttribute(position, i1);
+            c.fromBufferAttribute(position, i2);
+
+            volume += a.dot(b.clone().cross(c)) / 6;
+        }
+
+        return Math.abs(volume);
+    }
+    // #endregion
+
     // #region RaiseGlbLoaded
     /**
      * Raises the event for when the glb is loaded
@@ -467,7 +553,7 @@ class MainHandler
 
         let perspectiveCamera = new THREE.PerspectiveCamera(75, this.GetAspectRatio(), 0.1, 2000);
         perspectiveCamera.name = "Haupt-Kamera";
-        perspectiveCamera.position.set(-1, 3, -1);
+        perspectiveCamera.position.set(-0.345346, 2.500441, -3.571497);
         perspectiveCamera.lookAt(center);
         perspectiveCamera.updateProjectionMatrix();
         (<CameraWithControls><unknown>perspectiveCamera).isCameraWithControls = true;
@@ -620,6 +706,7 @@ class MainHandler
             {
                 const box = new THREE.Box3().setFromObject(this.mainContainerMesh);
                 let center = box.getCenter(new THREE.Vector3());
+                center.y -= 0.5;
                 this.orbitControls.target = center;
             }
 
@@ -694,6 +781,8 @@ class MainHandler
 let overlayContainerQuery = ".Overlay";
 let loadingProgressQuery = ".load-process";
 let loadingTextQuery = ".load-label-percent";
+let volumeTextElementQuery = ".StatsBox.Volume .Value";
+let maxVolumeTextElementQuery = ".StatsBox.Volume .MaxValue";
 
 let overlayContainer = document.querySelector<HTMLElement>(overlayContainerQuery);
 
@@ -720,8 +809,30 @@ if (loadingTextElement == null)
     throw new Error(`The Progress "${loadingTextQuery} was not found."`);
 }
 
+let volumeTextElement = document.querySelector<HTMLElement>(volumeTextElementQuery);
+
+if (volumeTextElement == null)
+{
+    throw new Error(`The VolumeTextElement "${volumeTextElementQuery} was not found."`);
+}
+
+let maxVolumeTextElement = document.querySelector<HTMLElement>(maxVolumeTextElementQuery);
+
+if (maxVolumeTextElement == null)
+{
+    throw new Error(`The MaxVolumeTextElement "${maxVolumeTextElementQuery} was not found."`);
+}
+
 let mainHandler = new MainHandler(window, ".CanvasContainer", "Main", "Camera");
 (<any>window).MainHandler = mainHandler;
+
+let numberFormatter = new Intl.NumberFormat(
+    undefined,
+    {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1
+    }
+);
 
 mainHandler.AddGlbLoadingprogessEventHandler((loadingProgess) => {
     if (loadingProgess < 100) {
@@ -732,6 +843,10 @@ mainHandler.AddGlbLoadingprogessEventHandler((loadingProgess) => {
 
     progressElement.setAttribute("value", loadingProgess.toString());
     loadingTextElement.innerText = loadingProgess.toString();
+});
+
+mainHandler.AddGlbLoadedEventHandler(()  => {
+    maxVolumeTextElement.innerText = numberFormatter.format(mainHandler.CalculateMainContainerVolume());
 });
 
 mainHandler.InitializeRender();

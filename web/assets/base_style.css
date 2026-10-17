@@ -193,9 +193,9 @@ progress::-moz-progress-bar {
     display: flex;
     flex-direction: row;
 
-    gap: 10px;
+    gap: 30px;
 
-    --header-heigth: 40px;
+    --header-heigth: 50px;
     height: var(--header-heigth);
 
     overflow: hidden;
@@ -213,16 +213,22 @@ progress::-moz-progress-bar {
 
         img {
             margin: 5px;
-            height: 30px;
-            width: 30px;
+            height: 40px;
+            width: 40px;
         }
 
-        div.Title {
+        div.Text {
             line-height: var(--header-heigth);
 
             font-size: 30px;
             font-weight: lighter;
         }
+    }
+
+    .Breadcrumb {
+        line-height: var(--header-heigth);
+
+        font-size: 25px;
     }
 
     .SettingsButton {
@@ -235,8 +241,8 @@ progress::-moz-progress-bar {
 
         img {
             margin: 10px;
-            height: 20px;
-            width: 20px;
+            height: 30px;
+            width: 30px;
         }
     }
 }
@@ -266,7 +272,7 @@ progress::-moz-progress-bar {
             --height: 132px;
             height: var(--height);
 
-            flex-basis: 250px;
+            flex-basis: 180px;
 
             background-color: var(--container-background-color);
 
@@ -363,12 +369,39 @@ progress::-moz-progress-bar {
     }
 }
 
+@media (max-width:500px) {
+    .MainHeader {
+        gap: 10px;
+
+        a.Title {
+            div.Text {
+                font-size: 20px;
+            }
+        }
+    }
+
+    .MainContent {
+        .StatsContainer {
+            .StatsBox {
+                .Value {
+                    line-height: 68px;
+                    font-size: 35px;
+                }
+            }
+        }
+    }
+}
+
 .Spacer {
     flex-grow: 1;
 }
 
 .Hide {
     display: none;
+}
+
+.CenterText {
+    text-align: center;
 }
 
 img.Icon {
