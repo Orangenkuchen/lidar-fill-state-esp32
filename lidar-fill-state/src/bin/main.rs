@@ -103,6 +103,20 @@ const WIFI_SSID: &str = env!("WIFI_SSID");
 /// The wifi password to use
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
+const STACK_SOCKETS: usize = 11;
+
+// Reserve capacity for the HTTP server's own socket usage.
+const RESERVED_SOCKETS: usize = 3;
+
+// This coresponds to the amounts of web-requests the server can accept at the same time.
+// Need a free tcp-buffer too per connection
+const RUN_WEBSERVER_WITH_SOCKETS: usize =
+    STACK_SOCKETS - RESERVED_SOCKETS;
+
+const TCP_BUFFER_N: usize = STACK_SOCKETS;
+const TCP_BUFFER_SEND_SIZE: usize = 2048;
+const TCP_BUFFER_RECEIVE_SIZE: usize = 512;
+
 /// If true the lidar will start the ranging measurment. If it switches to false the measument will stop
 static LIDAR_RUN_STATE: AtomicBool = AtomicBool::new(false);
 /// The state of the system
@@ -116,9 +130,9 @@ static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
 ///
 /// StackResources<8> gives the network stack room for several
 /// sockets.
-static STACK_RESOURCES: StaticCell<StackResources<8>> =
+static STACK_RESOURCES: StaticCell<StackResources<STACK_SOCKETS>> =
     StaticCell::new();
-static TCP_BUFFERS: StaticCell<TcpBuffers<1, 8192, 8192>> =
+static TCP_BUFFERS: StaticCell<TcpBuffers<TCP_BUFFER_N, TCP_BUFFER_SEND_SIZE, TCP_BUFFER_RECEIVE_SIZE>> =
     StaticCell::new();
 static LIDAR_READING: StaticCell<LidarReadingWatch> = StaticCell::new();
 static LIDAR_JSON_RESPONSE: StaticCell<LidarJsonResponseBuffer> = StaticCell::new();
@@ -544,7 +558,7 @@ async fn net_task(
 #[embassy_executor::task]
 async fn web_server_task(
     stack: Stack<'static>,
-    tcp_buffers: &'static TcpBuffers<1, 8192, 8192>,
+    tcp_buffers: &'static TcpBuffers<TCP_BUFFER_N, TCP_BUFFER_SEND_SIZE, TCP_BUFFER_RECEIVE_SIZE>,
     filesystem: &'static Mutex<
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
@@ -556,21 +570,25 @@ async fn web_server_task(
     reading_watch: &'static LidarReadingWatch,
     json_response_buffer: &'static LidarJsonResponseBuffer,
 ) -> ! {
-    let tcp = Tcp::new(stack, tcp_buffers);
-
-    let acceptor = tcp.bind("0.0.0.0:80".parse().unwrap())
-        .await
-        .expect("failed to bind HTTP port 80");
-
-    let mut server = DefaultServer::new();
-
     info!("HTTP server starting on port 80...");
 
     loop {
         trace!("Waiting for HTTP connections...");
+        let tcp = Tcp::new(stack, tcp_buffers);
+
+        let acceptor = match tcp.bind("0.0.0.0:80".parse().unwrap()).await {
+            Ok(acceptor) => acceptor,
+            Err(error) => {
+                error!("HTTP bind failed: {:?}", error);
+                Timer::after(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let mut server = DefaultServer::new();
 
         match server
-            .run_with_socket_queue::<_, _, 1>(
+            .run_with_socket_queue::<_, _, RUN_WEBSERVER_WITH_SOCKETS>(
                 None,
                 acceptor,
                 HttpHandler {
@@ -588,6 +606,8 @@ async fn web_server_task(
                 Timer::after(Duration::from_millis(100)).await;
             }
         }
+
+        Timer::after(Duration::from_secs(1)).await;
     }
 }
 
