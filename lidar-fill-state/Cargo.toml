@@ -79,6 +79,8 @@ nojson = { version = "0.3.15", default-features = false }
 
 embassy-sync = "0.7"
 
+gzip-bytes = { path = "./gzip-bytes" }
+
 [profile.dev]
 opt-level = "s"
 
