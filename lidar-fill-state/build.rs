@@ -12,6 +12,15 @@ const WIFI_FILE_PATH: &str = "wifi.env";
 const PARTITION_TABLE_FILE_PATH: &str = "partition-table.csv";
 
 fn main() {
+    println!("cargo:rerun-if-changed=../web");
+    println!("cargo:rerun-if-changed=../tsconfig.json");
+    let status = std::process::Command::new("tsc")
+        .args(["--project", "../tsconfig.json"])
+        .status()
+        .expect("Failed to run npx tsc; ensure Node.js is installed");
+
+    assert!(status.success(), "TypeScript compilation failed");
+
     linker_be_nice();
 
     cc::Build::new()

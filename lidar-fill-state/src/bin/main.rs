@@ -103,7 +103,7 @@ const WIFI_SSID: &str = env!("WIFI_SSID");
 /// The wifi password to use
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
-const STACK_SOCKETS: usize = 11;
+const STACK_SOCKETS: usize = 13;
 
 // Reserve capacity for the HTTP server's own socket usage.
 const RESERVED_SOCKETS: usize = 3;
@@ -1070,21 +1070,21 @@ async fn lidar_receiver_task(
 ) {
     loop {
         let reading = receiver.changed().await;
-        info!(
-            "VL53L8CX distance: {} mm, status: {}, temperature: {}",
-            reading.zones[0].distance_mm,
-            reading.zones[0].target_status,
-            reading.silicon_temp_degc,
-        );
+        // info!(
+        //     "VL53L8CX distance: {} mm, status: {}, temperature: {}",
+        //     reading.zones[0].distance_mm,
+        //     reading.zones[0].target_status,
+        //     reading.silicon_temp_degc,
+        // );
 
-        for row in 0..8 {
-            let mut line = heapless::String::<256>::new();
-            for column in 0..8 {
-                let zone = reading.zones[row * 8 + column];
-                let _ = write!(line, "{} ", left_pad(zone.distance_mm));
-            }
-            info!("{}", line);
-        }
+        // for row in 0..8 {
+        //     let mut line = heapless::String::<256>::new();
+        //     for column in 0..8 {
+        //         let zone = reading.zones[row * 8 + column];
+        //         let _ = write!(line, "{} ", left_pad(zone.distance_mm));
+        //     }
+        //     info!("{}", line);
+        // }
     }
 }
 

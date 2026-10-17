@@ -41,6 +41,10 @@ impl<E> From<edge_http::io::Error<E>> for WriteFileFromRequestError<E> {
 
 /// The html of the index page of the webserver
 const HTTP_INDEX_HTML: &'static [u8] = gzip_bytes!("../../../web/index.html");
+/// The js of the index page of the webserver
+const HTTP_INDEX_JS: &'static [u8] = gzip_bytes!("../../../web/dist/index.js");
+/// The map for the js of the index page of the webserver
+const HTTP_INDEX_JS_MAP: &'static [u8] = gzip_bytes!("../../../web/dist/index.js.map");
 /// The html of the settings page of the webserver
 const HTTP_SETTINGS_HTML: &'static [u8] = gzip_bytes!("../../../web/settings.html");
 /// The base css of the web pages of the webserver
@@ -1197,13 +1201,23 @@ impl Handler for HttpHandler {
         trace!("Received web request: {:?} {}", method, path);
 
         let future = with_timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(60),
             async {
                 match (method, path.as_str()) {
                     (Method::Get, "/") => self.serve_static_content(
                         conn,
                         "text/html; charset=utf-8",
                         HTTP_INDEX_HTML
+                    ).await,
+                    (Method::Get, "/index.js") => self.serve_static_content(
+                        conn,
+                        "application/javascript; charset=utf-8",
+                        HTTP_INDEX_JS
+                    ).await,
+                    (Method::Get, "/index.js.map") => self.serve_static_content(
+                        conn,
+                        "application/json; charset=utf-8",
+                        HTTP_INDEX_JS_MAP
                     ).await,
                     (Method::Get, "/settings") => self.serve_static_content(
                         conn,
