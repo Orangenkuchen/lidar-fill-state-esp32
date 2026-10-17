@@ -63,9 +63,9 @@ const STORAGE_BLOCK_SIZE: u32 = 4 * 1_024; // TODO: Mit main.rs const verbinden
 /// The amount of blocks in the storage
 const STORAGE_BLOCK_COUNT: u32 = 528; // TODO: Mit main.rs const verbinden
 /// The size of the http-connection buffer
-const HTTP_CONNECTION_BUFFER_SIZE: usize = 8192;
+const HTTP_CONNECTION_BUFFER_SIZE: usize = 1024;
 /// The maximum size of a json response
-const HTTP_JSON_REQUEST_MAX_SIZE: usize = 8192;
+const HTTP_JSON_REQUEST_MAX_SIZE: usize = 1024;
 
 use crate::modules::{
     file_manager::FileManager, html_form::Form, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,

@@ -5,8 +5,9 @@ use littlefs_rust::{
     Filesystem, OpenFlags
 };
 use embassy_sync::{
-    blocking_mutex::raw::{NoopRawMutex}, mutex::{Mutex},
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::Mutex,
 };
+use static_cell::StaticCell;
 use crate::modules::{
     little_fs_storage::LittleFsStorage,
 };
@@ -15,6 +16,11 @@ use crate::modules::{
 const GLB_FILE_PATH: &str = "Model.glb";
 /// The Path of the Settings-File in the filesystem
 const SETTINGS_JSON_FILE_PATH: &str = "Settings.json";
+
+const BLOCK_SIZE: usize = 1024;
+
+static FILE_BUFFER: Mutex<CriticalSectionRawMutex, [u8; BLOCK_SIZE]> =
+    Mutex::new([0; BLOCK_SIZE]);
 
 pub enum FileManagerError<E> {
     Fs(littlefs_rust::Error),
@@ -186,11 +192,11 @@ impl FileManager {
         };
         trace!("save_file > File was successfully opend.");
 
-        let mut buffer = [0u8; BLOCK_SIZE];
+        let mut buffer = FILE_BUFFER.lock().await;
 
         debug!("save_file > Staring to write the model to the filesystem...");
         loop {
-            let n = match reader.read(&mut buffer).await {
+            let n = match reader.read(&mut *buffer).await {
                 Ok(result) => result,
                 Err(error) => return Err(FileManagerError::Generic(error))
             };
@@ -240,11 +246,11 @@ impl FileManager {
         };
         trace!("load_file > File was successfully opend.");
 
-        let mut buffer = [0u8; BLOCK_SIZE];
+        let mut buffer = FILE_BUFFER.lock().await;
 
         debug!("load_file > Starting to send the file via the http_response...");
         loop {
-            let n = match file.read(&mut buffer) {
+            let n = match file.read(&mut *buffer) {
                 Ok(result) => result,
                 Err(error) => return Err(FileManagerError::Fs(error))
             };
