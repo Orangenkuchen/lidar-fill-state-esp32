@@ -1,0 +1,24 @@
+{
+    "name": "Lidar-Fill-State-Esp32",
+    "dockerComposeFile": "./compose.yaml",
+    "service": "main",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "stopCompose",
+    "postCreateCommand": "",
+    "postStartCommand": "cargo check; cd ./web; npm i;",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "1YiB.rust-bundle",
+                "dustypomerleau.rust-syntax",
+                "tamasfe.even-better-toml",
+                "jock.svg",
+                "MBKDevStudio.nightmesh"
+            ],
+            "settings": {
+                "window.title": "${dirty}${separator}lidar-fill-state-es32 [DevContainer]${activeEditorShort}${separator}${rootName}${separator}${profileName}${separator}${appName}"
+            }
+        }
+    }
+}

@@ -1,0 +1,8 @@
+services:
+  main:
+    build: .
+    command: sleep infinity
+    volumes:
+      - ../:/workspace
+      # Comment this line out, when you develop without the esp32 connected via usb
+      - /dev/ttyACM1:/dev/ttyACM1
