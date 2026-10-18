@@ -1,6 +1,6 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use proc_macro::{Span, TokenStream};
+use proc_macro::{TokenStream};
 use quote::quote;
 use std::io::Write;
 use std::path::Path;
@@ -10,13 +10,10 @@ pub fn gzip_bytes(input: TokenStream) -> TokenStream {
     let path = syn::parse_macro_input!(input as syn::LitStr);
     let relative_path = path.value();
 
-    // Get the Rust source file containing this macro invocation.
-    let source_file = Span::call_site().file();
-    let source_dir = Path::new(&source_file)
-        .parent()
-        .expect("Could not determine source directory");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR is not set");
 
-    let path = source_dir.join(&relative_path);
+    let path = Path::new(&manifest_dir).join(&relative_path);
 
     eprintln!("[gzip_bytes] Reading {}", path.display());
 

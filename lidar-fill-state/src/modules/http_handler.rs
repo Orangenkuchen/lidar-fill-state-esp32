@@ -40,25 +40,25 @@ impl<E> From<edge_http::io::Error<E>> for WriteFileFromRequestError<E> {
 }
 
 /// The html of the index page of the webserver
-const HTTP_INDEX_HTML: &'static [u8] = gzip_bytes!("../../../web/index.html");
+const HTTP_INDEX_HTML: &'static [u8] = gzip_bytes!("../web/index.html");
 /// The js of the index page of the webserver
-const HTTP_INDEX_JS: &'static [u8] = gzip_bytes!("../../../web/dist/index.js");
+const HTTP_INDEX_JS: &'static [u8] = gzip_bytes!("../web/dist/index.js");
 /// The map for the js of the index page of the webserver
-const HTTP_INDEX_JS_MAP: &'static [u8] = gzip_bytes!("../../../web/dist/index.js.map");
+const HTTP_INDEX_JS_MAP: &'static [u8] = gzip_bytes!("../web/dist/index.js.map");
 /// The html of the settings page of the webserver
-const HTTP_SETTINGS_HTML: &'static [u8] = gzip_bytes!("../../../web/settings.html");
+const HTTP_SETTINGS_HTML: &'static [u8] = gzip_bytes!("../web/settings.html");
 /// The base css of the web pages of the webserver
-const HTTP_BASE_STYLE_CSS: &'static [u8] = gzip_bytes!("../../../web/assets/base_style.css");
+const HTTP_BASE_STYLE_CSS: &'static [u8] = gzip_bytes!("../web/assets/base_style.css");
 /// The base css of the web pages of the webserver
-const HTTP_COG_ICON: &'static [u8] = gzip_bytes!("../../../web/assets/cog_icon.svg");
+const HTTP_COG_ICON: &'static [u8] = gzip_bytes!("../web/assets/cog_icon.svg");
 /// The Fav-Icon of the website
-const HTTP_FAV_ICON: &'static [u8] = gzip_bytes!("../../../web/favicon.ico");
+const HTTP_FAV_ICON: &'static [u8] = gzip_bytes!("../web/favicon.ico");
 /// The html of the swagger page
-const HTTP_SWAGGER_HTML: &'static [u8] = gzip_bytes!("../../../web/swagger/index.html");
+const HTTP_SWAGGER_HTML: &'static [u8] = gzip_bytes!("../web/swagger/index.html");
 /// The openapi json for the this api
-const HTTP_OPENAPI_JSON: &'static [u8] = gzip_bytes!("../../../web/swagger/openapi.json");
+const HTTP_OPENAPI_JSON: &'static [u8] = gzip_bytes!("../web/swagger/openapi.json");
 /// The html of the settings saved page
-const HTTP_SETTINGS_SAVE_SUCCESS_HTML: &'static [u8] = gzip_bytes!("../../../web/settings_success.html");
+const HTTP_SETTINGS_SAVE_SUCCESS_HTML: &'static [u8] = gzip_bytes!("../web/settings_success.html");
 /// The Path of the 3D-Model in the filesystem
 const GLB_FILE_PATH: &str = "Model.glb";
 /// The Path of the Settings-File in the filesystem
