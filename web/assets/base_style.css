@@ -11,7 +11,7 @@ body {
     --input-background-selected: #dddddd;
     --invalid-color: #9c0000;
     --form-border-color: #969696;
-    --progress-bar-foreground: orange;
+    --progress-bar-foreground: var(--primary-color);
     --progress-bar-background: #dfdfdf;
     --progress-bar-border-color: #969696;
     --header-background-color: #bfc5cc;
@@ -49,7 +49,7 @@ body {
         --input-background-selected: #202024;
         --invalid-color: #6b0000;
         --form-border-color: #54595d;
-        --progress-bar-foreground: orange;
+        --progress-bar-foreground: var(--primary-color);
         --progress-bar-background: #38383a;
         --progress-bar-border-color: #54595d;
         --header-background-color: #2c2e30;

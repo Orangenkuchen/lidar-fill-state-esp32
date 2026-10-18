@@ -15,6 +15,40 @@ interface CameraWithControls extends THREE.Camera
     isCameraWithControls: boolean;
 }
 
+/**
+ * A reading from the lidar
+ */
+interface LidarReading
+{
+    /**
+     * The temperature of the Sensor
+     */
+    silicon_temp_degc: number;
+
+    /**
+     * The millisecond timestamp sice startup when the reading was done
+     */
+    last_read_timestamp_ms: number;
+
+    /**
+     * The distances that were measured (8 rows x 8 columns)
+     */
+    distance_mm: Array<number>;
+}
+
+interface DistanceMeasuremnt
+{
+    /**
+     * The Distance from the floor
+     */
+    FromFloor: number | null;
+
+    /**
+     * The Distance from the Ceiling
+     */
+    FromCeiling: number | null;
+}
+
 class MainHandler
 {
     // #region fields
@@ -77,6 +111,11 @@ class MainHandler
     private readonly activeCameraChangeEventHandlerList: Array<() => void>;
 
     /**
+     * The registered Eventhandler for when new data is received and displayed
+     */
+    private readonly newDataEventHandlerList: Array<() => void>;
+
+    /**
      * The registered Eventhandler for when the loading of the glb is making progress
      */
     private readonly glbLoadingprogressEventHandlerList: Array<(loadingPercent: number) => void>;
@@ -109,7 +148,17 @@ class MainHandler
     /**
      * The main container mesh. Will only be filld after the glb is loaded.
      */
-    private mainContainerMesh: THREE.Mesh| null;
+    private mainContainerMesh: THREE.Mesh | null;
+
+    /**
+     * The last temperature reading of the lidar. Is null at the beginning.
+     */
+    private lastSensorTemperature: number | null;
+
+    /**
+     * The last distance measurments to the ceiling and floor. Is null at the beginning.
+     */
+    private lastDistanceToContainer: DistanceMeasuremnt | null;
 
     // /**
     //  * Controls to control the camera like in a FPS game
@@ -144,7 +193,10 @@ class MainHandler
         this.glbLoadedEventHandlerList = new Array<() => void>();
         this.activeCameraChangeEventHandlerList = new Array<() => void>();
         this.glbLoadingprogressEventHandlerList = new Array<() => void>();
+        this.newDataEventHandlerList = new Array<() => void>();
         this.mainContainerMesh = null;
+        this.lastSensorTemperature = null;
+        this.lastDistanceToContainer = null;
 
         this.window = window;
         this.containerMeshName = containerMeshName;
@@ -344,6 +396,28 @@ class MainHandler
     }
     // #endregion
 
+    // #region AddNewDataEventHandler
+    /**
+     * Registers a handler for when new data is received and displayed
+     * 
+     * @param handler The handler to register
+     * @returns Returns a action to unsubscribe
+     */
+    public AddNewDataEventHandler(handler: () => void): () => void
+    {
+        this.newDataEventHandlerList.push(handler);
+
+        return () => {
+            let index = this.newDataEventHandlerList.push(handler);
+
+            if (index != -1)
+            {
+                this.newDataEventHandlerList.splice(index);
+            }
+        };
+    }
+    // #endregion
+
     // #region ChangeCamera
     /**
      * Changes the Camera that is rendered
@@ -365,6 +439,26 @@ class MainHandler
     public get CameraList()
     {
         return this.cameras;
+    }
+    // #endregion
+
+    // #region LastSensorTemperature
+    /**
+     * The last temperature reading of the lidar
+     */
+    public get LastSensorTemperature(): number | null
+    {
+        return this.lastSensorTemperature;
+    }
+    // #endregion
+
+    // #region LastDistanceToContainer
+    /**
+     * The last distance measurments to the ceiling and floor. Is null at the beginning.
+     */
+    public get LastDistanceToContainer(): DistanceMeasuremnt | null
+    {
+        return this.lastDistanceToContainer;
     }
     // #endregion
 
@@ -495,6 +589,19 @@ class MainHandler
     }
     // #endregion
 
+    // #region RaiseNewData
+    /**
+     * Raises the event for when new data is received and displayed
+     */
+    private RaiseNewData(): void
+    {
+        for (let handler of this.newDataEventHandlerList)
+        {
+            handler();
+        }
+    }
+    // #endregion
+
     // #region HandleOnResize
     /**
      * Is called when the size of the window changes.
@@ -585,6 +692,8 @@ class MainHandler
         this.GameLoop();
         this.RaiseGlbLoaded();
         this.RaiseActiveCameraChange();
+
+        this.SetupFillStateMesh();
     }
     // #endregion
 
@@ -776,6 +885,271 @@ class MainHandler
         }
     }
     // #endregion
+
+    // #region SetupFillStateMesh
+    /**
+     * Sets up the periodic fetching of the lidar reading and
+     * creates a mesh from this to represent the fill state in the container
+     */
+    private SetupFillStateMesh(): void
+    {
+        let lidar = this.mainScene.getObjectByName(this.lidarCameraName);
+
+        if (lidar === undefined)
+        {
+            console.error(
+                "3D-Model: Lidar-Camera with the name \"%s\" wan't found. Fillstate will not be shown.",
+                this.lidarCameraName
+            );
+            return;
+        }
+        else if (typeof (<THREE.PerspectiveCamera>lidar).isPerspectiveCamera !== "boolean")
+        {
+            console.error(
+                "3D-Model: Lidar-Camera was found but isn't a perspective camera. Fillstate will not be shown.",
+                this.lidarCameraName
+            );
+            return;
+        }
+
+        let perspectiveCameraLidar = <THREE.PerspectiveCamera>lidar;
+
+        let verticalFov = perspectiveCameraLidar.fov;
+        let horizontalFov = verticalFov * ((<any>perspectiveCameraLidar).aspectRatio ?? 1);
+
+        let lastMesh: THREE.Mesh | null = null;
+        let getReadingAndDisplayInMesh = async () => {
+            let reading = await this.FetchLidarReading();
+
+            if (reading == null)
+            {
+                console.warn("3D-Model: Lidar reading was null. Skipping...");
+                return;
+            }
+
+            this.lastSensorTemperature = reading.silicon_temp_degc;
+
+            let newMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm);
+
+            this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
+
+            if (lastMesh != null)
+            {
+                lidar.remove(lastMesh);
+            }
+            lidar.add(newMesh);
+            lastMesh = newMesh;
+
+            this.RaiseNewData();
+        };
+
+        setInterval(getReadingAndDisplayInMesh, 2000);
+        getReadingAndDisplayInMesh();
+    }
+    // #endregion
+
+    // #region CreateLidarMesh
+    /**
+     * Creates a mesh for the lidar reading
+     * 
+     * @param rows The amount of lidar measurments per row
+     * @param columns The amount of lidar measuremnts per column
+     * @param fovX_in_deg The FOV in x direction in deg
+     * @param fovY_in_deg The FOV in y direction in deg
+     * @param readings_in_mm The Array with the readings in mm
+     *
+     * @returns Returns the created mesh
+     */
+    private CreateLidarMesh(
+        rows: number,
+        columns: number,
+        fovX_in_deg: number,
+        fovY_in_deg: number,
+        readings_in_mm: Array<number>): THREE.Mesh
+    {
+        const fovX = THREE.MathUtils.degToRad(fovX_in_deg);
+        const fovY = THREE.MathUtils.degToRad(fovY_in_deg);
+
+        const positions = [];
+        const indices = [];
+        const uvs: number[] = [];
+
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < columns; col++) {
+                const theta = ((col + 0.5) / 8 - 0.5) * fovX;
+                const phi = (0.5 - (row + 0.5) / 8) * fovY;
+
+                const d = readings_in_mm[row * 8 + col]! / 1000;
+
+                // Treat d as forward depth, not radial distance.
+                const x = d * Math.tan(theta);
+                const y = d * Math.tan(phi);
+                const z = -d;
+
+                positions.push(x, y, z);
+
+                // Map the texture across the LiDAR grid
+                const u = col / (columns - 1);
+                const v = 1 - row / (rows - 1);
+
+                uvs.push(u, v);
+            }
+        }
+
+        // Connect each grid cell to its neighbors
+        for (let row = 0; row < rows - 1; row++) {
+            for (let col = 0; col < columns - 1; col++) {
+                const a = row * columns + col;
+                const b = a + 1;
+                const c = a + columns;
+                const d = c + 1;
+
+                // Two triangles per grid cell
+                indices.push(a, c, b);
+                indices.push(b, c, d);
+            }
+        }
+        const geometry = new THREE.BufferGeometry();
+
+        geometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3)
+        );
+
+        geometry.setAttribute(
+            "uv",
+            new THREE.Float32BufferAttribute(uvs, 2)
+        );
+
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+
+        let material: THREE.MeshStandardMaterial;
+        let contentMaterial = this.mainScene.getObjectByName("ContentMaterial_Helper_Mesh");
+
+        if (contentMaterial === undefined || typeof (<any>contentMaterial).material !== "object" || typeof (<any>contentMaterial).material.isMeshStandardMaterial !== "boolean") {
+            material = new THREE.MeshStandardMaterial({
+                color: 0x00ff88,
+                side: THREE.DoubleSide,
+                wireframe: false,
+                transparent: true,
+                opacity: 0.65
+            });
+        }
+        else
+        {
+            material = (<THREE.MeshStandardMaterial>(<any>contentMaterial).material)
+        }
+
+        material.map!.wrapS = THREE.RepeatWrapping;
+        material.map!.wrapT = THREE.RepeatWrapping;
+
+        material.map!.repeat.set(8, 8); // Repeat texture 10x horizontally and vertically
+        material.map!.needsUpdate = true;
+
+        const mesh = new THREE.Mesh(geometry, material);
+
+        return mesh;
+    }
+    // #endregion
+
+    // #region GetDistanceFromCeilingFloor
+    /**
+     * Gets the distances from the object to the floor and ceiling of the container
+     * 
+     * @param object The object from which to measure
+     * @param container The container to measure to
+     * @returns Returns the values. The values are null if they never hit the container
+     */
+    private GetDistanceFromCeilingFloor(object: THREE.Object3D, container: THREE.Mesh): DistanceMeasuremnt
+    {
+        let measurementToCeiling = this.GetDistanceInDirection(object, container, new THREE.Vector3(0, 1, 0))
+        let measurementToFloor = this.GetDistanceInDirection(object, container, new THREE.Vector3(0, -1, 0))
+
+        return { FromCeiling: measurementToCeiling, FromFloor: measurementToFloor }
+    }
+    // #endregion
+
+    // #region GetDistanceInDirection
+    /**
+     * Gets the distance between the object and the next intersection with the floorMesh
+     * 
+     * @param object The object from which to start
+     * @param floorMesh The object to intersect with
+     * @param direction The direction of the measurement from "object"
+     * @returns Returns the distance to the intersection or null if it never intersects
+     */
+    private GetDistanceInDirection(object: THREE.Object3D, floorMesh: THREE.Mesh, direction: THREE.Vector3)
+    {
+        object.updateWorldMatrix(true, false);
+        floorMesh.updateWorldMatrix(true, false);
+
+        // Get the object's world position
+        const origin = new THREE.Vector3();
+        object.getWorldPosition(origin);
+
+        const raycaster = new THREE.Raycaster(
+            origin,
+            direction,
+            0,
+            Infinity
+        );
+
+        const materials = Array.isArray(floorMesh.material)
+            ? floorMesh.material
+            : [floorMesh.material];
+
+        const originalSides = materials.map(material => material.side);
+
+        try
+        {
+            // Make the material doublesided so that the ray always hits
+            // will be reset afterwards
+            for (const material of materials)
+            {
+                material.side = THREE.DoubleSide;
+            }
+
+            const hits = raycaster.intersectObject(floorMesh, true);
+
+            if (hits.length < 1) {
+                return null; // No floor intersection
+            }
+
+            return hits[0]!.distance;
+        }
+        finally
+        {
+            materials.forEach((material, i) => {
+                material.side = originalSides[i]!;
+            });
+        }
+    }
+    // #endregion
+
+    // #region FetchLidarReading
+    /**
+     * Fetches the Lidar-Reading from the api
+     * 
+     * @returns Returns the Reading or null if the response wan't ok
+     */
+    private async FetchLidarReading(): Promise<LidarReading | null>
+    {
+        let endpoint = "/api/data";
+
+        let response = await fetch(endpoint);
+
+        if (response.ok == false)
+        {
+            console.error("Error while fetching lidar reading: Status %i - %s", response.status, response.statusText)
+            throw null
+        }
+
+        let data: LidarReading = await response.json();
+
+        return data;
+    }
+    // #endregion
 }
 
 let overlayContainerQuery = ".Overlay";
@@ -783,6 +1157,9 @@ let loadingProgressQuery = ".load-process";
 let loadingTextQuery = ".load-label-percent";
 let volumeTextElementQuery = ".StatsBox.Volume .Value";
 let maxVolumeTextElementQuery = ".StatsBox.Volume .MaxValue";
+let temperatureTextElementQuery = ".StatsBox.Temperature .Value";
+let distanceToFloorTextElementQuery = ".StatsBox.Temperature .DistanceToFloor";
+let distanceToCeilingTextElementQuery = ".StatsBox.Temperature .DistanceToCeiling";
 
 let overlayContainer = document.querySelector<HTMLElement>(overlayContainerQuery);
 
@@ -823,7 +1200,28 @@ if (maxVolumeTextElement == null)
     throw new Error(`The MaxVolumeTextElement "${maxVolumeTextElementQuery} was not found."`);
 }
 
-let mainHandler = new MainHandler(window, ".CanvasContainer", "Main", "Camera");
+let temperatureTextElement = document.querySelector<HTMLElement>(temperatureTextElementQuery);
+
+if (temperatureTextElement == null)
+{
+    throw new Error(`The TemperatureTextElement "${temperatureTextElementQuery} was not found."`);
+}
+
+let distanceToFloorTextElement = document.querySelector<HTMLElement>(distanceToFloorTextElementQuery);
+
+if (distanceToFloorTextElement == null)
+{
+    throw new Error(`The DistanceToFloorTextElement "${distanceToFloorTextElementQuery} was not found."`);
+}
+
+let distanceToCeilingTextElement = document.querySelector<HTMLElement>(distanceToCeilingTextElementQuery);
+
+if (distanceToCeilingTextElement == null)
+{
+    throw new Error(`The DistanceToCeilingTextElement "${distanceToCeilingTextElementQuery} was not found."`);
+}
+
+let mainHandler = new MainHandler(window, ".CanvasContainer", "Main", "Lidar");
 (<any>window).MainHandler = mainHandler;
 
 let numberFormatter = new Intl.NumberFormat(
@@ -847,6 +1245,35 @@ mainHandler.AddGlbLoadingprogessEventHandler((loadingProgess) => {
 
 mainHandler.AddGlbLoadedEventHandler(()  => {
     maxVolumeTextElement.innerText = numberFormatter.format(mainHandler.CalculateMainContainerVolume());
+});
+
+mainHandler.AddNewDataEventHandler(()  => {
+    if (mainHandler.LastSensorTemperature == null)
+    {
+        temperatureTextElement.innerHTML = "error";
+    }
+    else
+    {
+        temperatureTextElement.innerText = numberFormatter.format(mainHandler.LastSensorTemperature);
+    }
+
+    if (mainHandler.LastDistanceToContainer?.FromFloor == null)
+    {
+        distanceToFloorTextElement.innerHTML = "error";
+    }
+    else
+    {
+        distanceToFloorTextElement.innerText = numberFormatter.format(mainHandler.LastDistanceToContainer.FromFloor);
+    }
+
+    if (mainHandler.LastDistanceToContainer?.FromCeiling == null)
+    {
+        distanceToCeilingTextElement.innerHTML = "error";
+    }
+    else
+    {
+        distanceToCeilingTextElement.innerText = numberFormatter.format(mainHandler.LastDistanceToContainer.FromCeiling);
+    }
 });
 
 mainHandler.InitializeRender();
