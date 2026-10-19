@@ -158,8 +158,51 @@ impl HttpHandler {
         };
         trace!("handle_get_model3d > File size was received ({}).", size);
 
+        debug!("handle_get_model3d > Checking for \"If-None-Match\" Header...");
+        let if_none_match_header: Option<heapless::String<64>> = {
+            let header = match conn.headers() {
+                Err(error) => return Err(error),
+                Ok(header) => header
+            };
+            
+            header.headers.get("If-None-Match").and_then(|value| {
+                let mut owned = heapless::String::new();
+                owned.push_str(value).ok()?;
+                Some(owned)
+            })
+        };
+
+        let mut etag = heapless::String::<10>::new();
+        write!(etag, "W/\"{}\"", size).unwrap();
+
+        match if_none_match_header {
+            None => {},
+            Some(value) => {
+                if value.as_str() == etag.as_str()
+                {
+                    debug!("handle_get_model3d > \"If-None-Match\"-Header matched. Returing 304 Not Modified...");
+                    match conn.initiate_response(
+                        304,
+                        Some("Not Modified"),
+                        &[],
+                    ).await {
+                        Ok(()) => {},
+                        Err(error) => {
+                            error!("handle_get_model3d > Error while initializing the response: {}", error);
+                            return Err(error);
+                        }
+                    };
+                }
+                else
+                {
+                    debug!("handle_get_model3d > \"If-None-Match\"-Header didn't match. Continuing normally...");    
+                }
+            }
+        }
+
         let mut content_length = heapless::String::<10>::new();
         write!(content_length, "{}", size).unwrap();
+
         let mut content_disposition = heapless::String::<64>::new();
         write!(content_disposition, "attachment; filename=\"{}\"", GLB_FILE_PATH).unwrap();
 
@@ -170,7 +213,8 @@ impl HttpHandler {
             &[
                 ("Content-Type", "model/gltf-binary"),
                 ("Content-Length", content_length.as_str()),
-                ("Content-Disposition", content_disposition.as_str())
+                ("Content-Disposition", content_disposition.as_str()),
+                ("ETag", etag.as_str())
             ],
         ).await {
             Ok(()) => {},
@@ -837,8 +881,50 @@ impl HttpHandler {
     {
         info!("serve_static_content > Was called...");
 
+        debug!("serve_static_content > Checking for \"If-None-Match\" Header...");
+        let if_none_match_header: Option<heapless::String<64>> = {
+            let header = match conn.headers() {
+                Err(error) => return Err(error),
+                Ok(header) => header
+            };
+            
+            header.headers.get("If-None-Match").and_then(|value| {
+                let mut owned = heapless::String::new();
+                owned.push_str(value).ok()?;
+                Some(owned)
+            })
+        };
+
         let mut content_length = heapless::String::<10>::new();
         write!(content_length, "{}", content_bytes.len()).unwrap();
+
+        let mut etag = heapless::String::<10>::new();
+        write!(etag, "W/\"{}\"", content_bytes.len()).unwrap();
+
+        match if_none_match_header {
+            None => {},
+            Some(value) => {
+                if value.as_str() == etag.as_str()
+                {
+                    debug!("serve_static_content > \"If-None-Match\"-Header matched. Returing 304 Not Modified...");
+                    match conn.initiate_response(
+                        304,
+                        Some("Not Modified"),
+                        &[],
+                    ).await {
+                        Ok(()) => {},
+                        Err(error) => {
+                            error!("serve_static_content > Error while initializing the response: {}", error);
+                            return Err(error);
+                        }
+                    };
+                }
+                else
+                {
+                    debug!("serve_static_content > \"If-None-Match\"-Header didn't match. Continuing normally...");    
+                }
+            }
+        }
 
         debug!("serve_static_content > Initialising the response (200; {})...", mime_type);
         match conn.initiate_response(
@@ -848,6 +934,7 @@ impl HttpHandler {
                 ("Content-Type", mime_type),
                 ("Content-Length", content_length.as_str()),
                 ("Content-Encoding", "gzip"),
+                ("ETag", etag.as_str())
             ],
         ).await {
             Ok(()) => {},
