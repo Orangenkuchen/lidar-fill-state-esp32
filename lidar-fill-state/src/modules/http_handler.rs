@@ -448,7 +448,14 @@ impl HttpHandler {
         info!("handle_get_api_data > Was called...");
 
         debug!("handle_get_api_data > Getting the latest lidar reading...");
-        let mut receiver = self.reading_watch.receiver().unwrap();
+        let mut receiver = match self.reading_watch.receiver() {
+            Some(receiver) => receiver,
+            None => {
+                error!("LIDAR reading receiver is not available");
+                // Return an appropriate error for your handler here.
+                return Err(edge_http::io::Error::InvalidBody);
+            }
+        };
         let lidar_reading = receiver.get().await;
         trace!("handle_get_api_data > Lidar reading was received.");
 
