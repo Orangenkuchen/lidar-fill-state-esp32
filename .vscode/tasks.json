@@ -32,6 +32,10 @@
             "label": "rust: cargo run",
             "options": {
                 "cwd": "${workspaceFolder}/lidar-fill-state"
+            },
+            "icon": {
+                "color": "terminal.ansiGreen",
+                "id": "debug-start"
             }
         }
     ]

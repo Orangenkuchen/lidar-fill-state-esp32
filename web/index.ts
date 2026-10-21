@@ -685,7 +685,7 @@ class MainHandler
             ? mainContainerMesh.material
             : [mainContainerMesh.material];
         for (const material of materials) {
-            material.side = THREE.FrontSide;
+            material.side = THREE.BackSide;
             material.needsUpdate = true;
         }
 
@@ -931,14 +931,14 @@ class MainHandler
 
             let newMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm);
 
-            this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
-
             if (lastMesh != null)
             {
                 lidar.remove(lastMesh);
             }
             lidar.add(newMesh);
             lastMesh = newMesh;
+
+            this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
 
             this.RaiseNewData();
         };
@@ -1084,13 +1084,13 @@ class MainHandler
         object.updateWorldMatrix(true, false);
         floorMesh.updateWorldMatrix(true, false);
 
-        // Get the object's world position
-        const origin = new THREE.Vector3();
-        object.getWorldPosition(origin);
+        const origin = this.GetMeshCenterWorld(<any>object);
+
+        const normalizedDirection = direction.clone().normalize();
 
         const raycaster = new THREE.Raycaster(
             origin,
-            direction,
+            normalizedDirection,
             0,
             Infinity
         );
@@ -1127,6 +1127,27 @@ class MainHandler
     }
     // #endregion
 
+    // #region GetMeshCenterWorld
+    /**
+     * Gets the Center of the Mesh-Points (not the Mesh-Origin)
+     * 
+     * @param mesh The Mesh to use
+     * @returns Returns the Position
+     */
+    private GetMeshCenterWorld(mesh: THREE.Mesh): THREE.Vector3 {
+        mesh.updateWorldMatrix(true, false);
+
+        const geometry = mesh.geometry;
+        geometry.computeBoundingBox();
+
+        // Center of the geometry's local-space bounding box
+        const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
+
+        // Convert the local-space point to world coordinates
+        return mesh.localToWorld(center);
+    }
+    // #endregion
+
     // #region FetchLidarReading
     /**
      * Fetches the Lidar-Reading from the api
@@ -1137,88 +1158,71 @@ class MainHandler
     {
         let endpoint = "/api/data";
 
-        let response = await fetch(endpoint);
+        let data: LidarReading;
 
-        if (response.ok == false)
+        if (typeof fetch === "function")
         {
-            console.error("Error while fetching lidar reading: Status %i - %s", response.status, response.statusText)
-            throw null
-        }
+            let response = await fetch(endpoint);
 
-        let data: LidarReading = await response.json();
+            if (response.ok == false)
+            {
+                console.error("Error while fetching lidar reading: Status %i - %s", response.status, response.statusText);
+                throw null;
+            }
+
+            data = await response.json();
+        }
+        else
+        {
+            data = await new Promise((resolve, error) =>
+            {
+                let xhttp = new XMLHttpRequest();
+                xhttp.onreadystatechange = function() {
+                    if (this.readyState == 4 && this.status == 200) {
+                        resolve(JSON.parse(xhttp.responseText));
+                    }
+                    else
+                    {
+                        console.error("Error while fetching lidar reading: Status %i - %s", this.status, xhttp.statusText);
+                        error(null);
+                    }
+                };
+                xhttp.open("GET", "filename", true);
+                xhttp.send();
+            });
+        }        
 
         return data;
     }
     // #endregion
 }
 
-let overlayContainerQuery = ".Overlay";
-let loadingProgressQuery = ".load-process";
-let loadingTextQuery = ".load-label-percent";
-let volumeTextElementQuery = ".StatsBox.Volume .Value";
-let maxVolumeTextElementQuery = ".StatsBox.Volume .MaxValue";
-let temperatureTextElementQuery = ".StatsBox.Temperature .Value";
-let distanceToFloorTextElementQuery = ".StatsBox.Temperature .DistanceToFloor";
-let distanceToCeilingTextElementQuery = ".StatsBox.Temperature .DistanceToCeiling";
-
-let overlayContainer = document.querySelector<HTMLElement>(overlayContainerQuery);
-
-if (overlayContainer == null)
+function GetElementOrThrowError<TElement extends Element>(selector: string, name: string): TElement
 {
-    throw new Error(`The OverlayContainer "${overlayContainerQuery} was not found."`);
+    let element = document.querySelector<TElement>(selector);
+
+    if (element == null)
+    {
+        throw new Error(`The ${name} "${selector} was not found."`);
+    }
+
+    return element;
 }
 
-let progressElement = overlayContainer.querySelector<HTMLElement>(loadingProgressQuery);
+let loadingProgressQuery = ".load-process";
 
-if (progressElement == null)
-{
-    throw new Error(`The Progress "${loadingProgressQuery} was not found."`);
-} 
-else if (progressElement instanceof HTMLProgressElement == false)
+let overlayContainer = GetElementOrThrowError<HTMLElement>(".Overlay", "OverlayContainer");
+let progressElement = GetElementOrThrowError<HTMLElement>(loadingProgressQuery, "Progress");
+let loadingTextElement = GetElementOrThrowError<HTMLElement>(".load-label-percent", "LoadingText");
+// let volumeTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .Value", "Volume-Text");
+let maxVolumeTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .MaxValue", "MaxVolumeTextElement");
+let temperatureTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .Value", "TemperatureText");
+let distanceToFloorTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .DistanceToFloor", "DistanceToFloorTextElement");
+let distanceToCeilingTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .DistanceToCeiling", "DistanceToCeilingTextElement");
+
+if (progressElement instanceof HTMLProgressElement == false)
 {
     console.warn(`The Progress-Element "${loadingProgressQuery} wasn't a HTMLProgressElement. Might not work..."`);
-}
-
-let loadingTextElement = overlayContainer.querySelector<HTMLElement>(loadingTextQuery);
-
-if (loadingTextElement == null)
-{
-    throw new Error(`The Progress "${loadingTextQuery} was not found."`);
-}
-
-let volumeTextElement = document.querySelector<HTMLElement>(volumeTextElementQuery);
-
-if (volumeTextElement == null)
-{
-    throw new Error(`The VolumeTextElement "${volumeTextElementQuery} was not found."`);
-}
-
-let maxVolumeTextElement = document.querySelector<HTMLElement>(maxVolumeTextElementQuery);
-
-if (maxVolumeTextElement == null)
-{
-    throw new Error(`The MaxVolumeTextElement "${maxVolumeTextElementQuery} was not found."`);
-}
-
-let temperatureTextElement = document.querySelector<HTMLElement>(temperatureTextElementQuery);
-
-if (temperatureTextElement == null)
-{
-    throw new Error(`The TemperatureTextElement "${temperatureTextElementQuery} was not found."`);
-}
-
-let distanceToFloorTextElement = document.querySelector<HTMLElement>(distanceToFloorTextElementQuery);
-
-if (distanceToFloorTextElement == null)
-{
-    throw new Error(`The DistanceToFloorTextElement "${distanceToFloorTextElementQuery} was not found."`);
-}
-
-let distanceToCeilingTextElement = document.querySelector<HTMLElement>(distanceToCeilingTextElementQuery);
-
-if (distanceToCeilingTextElement == null)
-{
-    throw new Error(`The DistanceToCeilingTextElement "${distanceToCeilingTextElementQuery} was not found."`);
 }
 
 let mainHandler = new MainHandler(window, ".CanvasContainer", "Main", "Lidar");
