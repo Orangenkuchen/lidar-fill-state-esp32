@@ -1228,11 +1228,18 @@ if (progressElement instanceof HTMLProgressElement == false)
 let mainHandler = new MainHandler(window, ".CanvasContainer", "Main", "Lidar");
 (<any>window).MainHandler = mainHandler;
 
-let numberFormatter = new Intl.NumberFormat(
+let numberFormatterNoDecimals = new Intl.NumberFormat(
     undefined,
     {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0
+    }
+);
+let numberFormatterLong = new Intl.NumberFormat(
+    undefined,
+    {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
     }
 );
 
@@ -1248,7 +1255,7 @@ mainHandler.AddGlbLoadingprogessEventHandler((loadingProgess) => {
 });
 
 mainHandler.AddGlbLoadedEventHandler(()  => {
-    maxVolumeTextElement.innerText = numberFormatter.format(mainHandler.CalculateMainContainerVolume());
+    maxVolumeTextElement.innerText = numberFormatterLong.format(mainHandler.CalculateMainContainerVolume());
 });
 
 mainHandler.AddNewDataEventHandler(()  => {
@@ -1258,7 +1265,7 @@ mainHandler.AddNewDataEventHandler(()  => {
     }
     else
     {
-        temperatureTextElement.innerText = numberFormatter.format(mainHandler.LastSensorTemperature);
+        temperatureTextElement.innerText = numberFormatterNoDecimals.format(mainHandler.LastSensorTemperature);
     }
 
     if (mainHandler.LastDistanceToContainer?.FromFloor == null)
@@ -1267,7 +1274,7 @@ mainHandler.AddNewDataEventHandler(()  => {
     }
     else
     {
-        distanceToFloorTextElement.innerText = numberFormatter.format(mainHandler.LastDistanceToContainer.FromFloor);
+        distanceToFloorTextElement.innerText = numberFormatterLong.format(mainHandler.LastDistanceToContainer.FromFloor);
     }
 
     if (mainHandler.LastDistanceToContainer?.FromCeiling == null)
@@ -1276,7 +1283,7 @@ mainHandler.AddNewDataEventHandler(()  => {
     }
     else
     {
-        distanceToCeilingTextElement.innerText = numberFormatter.format(mainHandler.LastDistanceToContainer.FromCeiling);
+        distanceToCeilingTextElement.innerText = numberFormatterLong.format(mainHandler.LastDistanceToContainer.FromCeiling);
     }
 });
 
