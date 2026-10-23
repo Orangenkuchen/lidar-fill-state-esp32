@@ -7,35 +7,65 @@
             "problemMatcher": [
                 "$rustc"
             ],
-            "label": "rust: cargo check",
+            "label": "cargo check",
+            "detail": "Check if the rust project has correct syntax.",
             "options": {
                 "cwd": "${workspaceFolder}/lidar-fill-state"
+            },
+            "icon": {
+                "id": "build",
+                "color": "terminal.ansiYellow"
             }
         },
         {
             "type": "cargo",
             "command": "build",
+            "detail": "Builds the rust project.",
             "problemMatcher": [
                 "$rustc"
             ],
-            "label": "rust: cargo build",
+            "label": "cargo build",
+            "group": "build",
             "options": {
                 "cwd": "${workspaceFolder}/lidar-fill-state"
+            },
+            "icon": {
+                "id": "build",
+                "color": "terminal.ansiRed"
             }
         },
         {
             "type": "cargo",
             "command": "run",
+            "detail": "Builds the rust project and uploads it to the esp32.",
             "problemMatcher": [
                 "$rustc"
             ],
-            "label": "rust: cargo run",
+            "label": "cargo run",
             "options": {
                 "cwd": "${workspaceFolder}/lidar-fill-state"
             },
             "icon": {
                 "color": "terminal.ansiGreen",
                 "id": "debug-start"
+            },
+            "runOptions": {
+                "instanceLimit": 1,
+                "instancePolicy": "terminateOldest"
+            }
+        },
+        {
+            "type": "typescript",
+            "tsconfig": "tsconfig.json",
+            "problemMatcher": [
+                "$tsc"
+            ],
+            "group": "build",
+            "label": "tsc",
+            "detail": "Compiles the typescript.",
+            "icon": {
+                "id": "build",
+                "color": "terminal.ansiCyan"
             }
         }
     ]
