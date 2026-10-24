@@ -14,7 +14,8 @@
                 "dustypomerleau.rust-syntax",
                 "tamasfe.even-better-toml",
                 "jock.svg",
-                "MBKDevStudio.nightmesh"
+                "MBKDevStudio.nightmesh",
+                "probe-rs.probe-rs-debugger"
             ],
             "settings": {
                 "window.title": "${dirty}${separator}lidar-fill-state-es32 [DevContainer]${activeEditorShort}${separator}${rootName}${separator}${profileName}${separator}${appName}"

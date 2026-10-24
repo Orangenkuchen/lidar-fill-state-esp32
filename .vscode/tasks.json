@@ -20,7 +20,7 @@
         {
             "type": "cargo",
             "command": "build",
-            "detail": "Builds the rust project.",
+            "detail": "Build the rust project.",
             "problemMatcher": [
                 "$rustc"
             ],
@@ -32,6 +32,29 @@
             "icon": {
                 "id": "build",
                 "color": "terminal.ansiRed"
+            }
+        },
+        {
+            "label": "cargo build (debug)",
+            "type": "shell",
+            "command": "cargo",
+            "detail": "Build the rust project with debug information.",
+            "args": [
+                "build",
+                "--target",
+                "riscv32imac-unknown-none-elf"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/lidar-fill-state"
+            },
+            "problemMatcher": ["$rustc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "icon": {
+                "id": "build",
+                "color": "terminal.ansiMagenta"
             }
         },
         {
