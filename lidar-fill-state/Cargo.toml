@@ -82,8 +82,7 @@ embassy-sync = "0.7"
 gzip-bytes = { path = "./gzip-bytes" }
 
 [profile.dev]
-opt-level = 0
-debug = 2
+opt-level = "s"
 
 [profile.release]
 codegen-units = 1
