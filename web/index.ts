@@ -3,6 +3,12 @@ import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // import { FirstPersonControls } from './FirstPersonControls.ts';
 import STATS from 'three/addons/libs/stats.module.js';
+import {
+    Brush,
+    Evaluator,
+    INTERSECTION
+} from "three-bvh-csg";
+
 
 /**
  * A camera with controls
@@ -260,7 +266,17 @@ class MainHandler
             "/api/model3d",
             (data) => this.HandleOnGlbLoadingIsDone(data),
             (progressEvent: ProgressEvent) => this.HandleOnGlbLoadProgress(progressEvent),
-            (error) => console.error("3D-Model: Error while loading the glb file: %o", error)
+            (error) => {
+                if (typeof (<any>error).response === "object" &&
+                    (<any>error).response instanceof Response &&
+                    (<Response>(<any>error).response).status == 474)
+                {
+                    console.info("3D-Model: Could not be loaded, because it's missing on the server.");
+                    alert("Das 3D-Model ist noch nicht auf dem Server hinterlegt.\n\nDas Model kann in den Einstellungen hochgeladen werden.");
+                }
+
+                console.error("3D-Model: Error while loading the glb file: %o", error)
+            }
         );
 
         console.log(this.lidarCameraName);
@@ -917,86 +933,105 @@ class MainHandler
         let verticalFov = perspectiveCameraLidar.fov;
         let horizontalFov = verticalFov * ((<any>perspectiveCameraLidar).aspectRatio ?? 1);
 
-        let lastMesh: THREE.Mesh | null = null;
-        let getReadingAndDisplayInMesh = async () => {
-            let reading = await this.FetchLidarReading();
-
-            if (reading == null)
+        let lastIntersectMeshDebug: THREE.Mesh | null = null;
+        let getReadingAndDisplayInMesh = async () =>
+        {
+            try
             {
-                console.warn("3D-Model: Lidar reading was null. Skipping...");
-                return;
+                let reading = await this.FetchLidarReading();
+
+                if (reading == null)
+                {
+                    console.warn("3D-Model: Lidar reading was null. Skipping...");
+                    return;
+                }
+
+                this.lastSensorTemperature = reading.silicon_temp_degc;
+
+                let newMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm, 10, 5);
+
+                newMesh.updateWorldMatrix(true, false);
+                this.mainContainerMesh!.updateWorldMatrix(true, false);
+
+                lidar.add(newMesh);
+
+                let intersectMesh = this.IntersectMeshes(newMesh, this.mainContainerMesh!);
+                lidar.remove(newMesh);
+                if (lastIntersectMeshDebug != null)
+                {
+                    this.mainScene.remove(lastIntersectMeshDebug);
+                    lastIntersectMeshDebug = null;
+                }
+                this.mainScene.add(intersectMesh);
+                lastIntersectMeshDebug = intersectMesh;
+
+                this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
+
+                this.RaiseNewData();
             }
-
-            this.lastSensorTemperature = reading.silicon_temp_degc;
-
-            let newMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm);
-
-            if (lastMesh != null)
+            finally
             {
-                lidar.remove(lastMesh);
+                setTimeout(getReadingAndDisplayInMesh, 2000);
             }
-            lidar.add(newMesh);
-            lastMesh = newMesh;
-
-            this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
-
-            this.RaiseNewData();
         };
 
-        setInterval(getReadingAndDisplayInMesh, 2000);
+        setTimeout(getReadingAndDisplayInMesh, 2000);
         getReadingAndDisplayInMesh();
     }
     // #endregion
 
     // #region CreateLidarMesh
     /**
-     * Creates a mesh for the lidar reading
-     * 
-     * @param rows The amount of lidar measurments per row
-     * @param columns The amount of lidar measuremnts per column
-     * @param fovX_in_deg The FOV in x direction in deg
-     * @param fovY_in_deg The FOV in y direction in deg
-     * @param readings_in_mm The Array with the readings in mm
+     * Creates a mesh for the LiDAR reading, including an outer border.
      *
-     * @returns Returns the created mesh
+     * @param rows The amount of LiDAR measurements per row
+     * @param columns The amount of LiDAR measurements per column
+     * @param fovX_in_deg The FOV in x direction in degrees
+     * @param fovY_in_deg The FOV in y direction in degrees
+     * @param readings_in_mm The array with the readings in mm
+     * @param borderWidth The border extension width in meters
+     *
+     * @returns The created mesh
      */
     private CreateLidarMesh(
         rows: number,
         columns: number,
         fovX_in_deg: number,
         fovY_in_deg: number,
-        readings_in_mm: Array<number>): THREE.Mesh
+        readings_in_mm: Array<number>,
+        borderWidth: number = 0.5,
+        extrusionDepth: number = 1.0): THREE.Mesh
     {
         const fovX = THREE.MathUtils.degToRad(fovX_in_deg);
         const fovY = THREE.MathUtils.degToRad(fovY_in_deg);
 
-        const positions = [];
-        const indices = [];
+        const positions: number[] = [];
+        const indices: number[] = [];
         const uvs: number[] = [];
 
+        // Create the LiDAR grid vertices.
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < columns; col++) {
-                const theta = ((col + 0.5) / 8 - 0.5) * fovX;
-                const phi = (0.5 - (row + 0.5) / 8) * fovY;
+                const theta = ((col + 0.5) / columns - 0.5) * fovX;
+                const phi = (0.5 - (row + 0.5) / rows) * fovY;
 
-                const d = readings_in_mm[row * 8 + col]! / 1000;
+                const d = readings_in_mm[row * columns + col]! / 1000;
 
-                // Treat d as forward depth, not radial distance.
+                // Treat d as forward depth.
                 const x = d * Math.tan(theta);
                 const y = d * Math.tan(phi);
                 const z = -d;
 
                 positions.push(x, y, z);
 
-                // Map the texture across the LiDAR grid
-                const u = col / (columns - 1);
-                const v = 1 - row / (rows - 1);
+                const u = columns > 1 ? col / (columns - 1) : 0.5;
+                const v = rows > 1 ? 1 - row / (rows - 1) : 0.5;
 
                 uvs.push(u, v);
             }
         }
 
-        // Connect each grid cell to its neighbors
+        // Connect the LiDAR grid cells.
         for (let row = 0; row < rows - 1; row++) {
             for (let col = 0; col < columns - 1; col++) {
                 const a = row * columns + col;
@@ -1004,11 +1039,193 @@ class MainHandler
                 const c = a + columns;
                 const d = c + 1;
 
-                // Two triangles per grid cell
                 indices.push(a, c, b);
                 indices.push(b, c, d);
             }
         }
+
+        // Add the outer border.
+        if (borderWidth > 0 && rows >= 2 && columns >= 2) {
+            // Find the center of the grid in the XY plane.
+            let minX = Infinity;
+            let maxX = -Infinity;
+            let minY = Infinity;
+            let maxY = -Infinity;
+
+            for (let i = 0; i < positions.length; i += 3) {
+                minX = Math.min(minX, positions[i]!);
+                maxX = Math.max(maxX, positions[i]!);
+                minY = Math.min(minY, positions[i + 1]!);
+                maxY = Math.max(maxY, positions[i + 1]!);
+            }
+
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+
+            // Collect the perimeter vertices in order.
+            const perimeter: number[] = [];
+
+            // First row.
+            for (let col = 0; col < columns; col++) {
+                perimeter.push(col);
+            }
+
+            // Right edge.
+            for (let row = 1; row < rows; row++) {
+                perimeter.push(row * columns + columns - 1);
+            }
+
+            // Last row.
+            for (let col = columns - 2; col >= 0; col--) {
+                perimeter.push((rows - 1) * columns + col);
+            }
+
+            // Left edge.
+            for (let row = rows - 2; row > 0; row--) {
+                perimeter.push(row * columns);
+            }
+
+            const outerPerimeter: number[] = [];
+
+            // Create an outward offset vertex for each perimeter vertex.
+            for (const index of perimeter) {
+                const i = index * 3;
+
+                const x = positions[i]!;
+                const y = positions[i + 1]!;
+                const z = positions[i + 2]!;
+
+                const dx = x - centerX;
+                const dy = y - centerY;
+                const length = Math.sqrt(dx * dx + dy * dy);
+
+                const nx = length > 1e-8 ? dx / length : 0;
+                const ny = length > 1e-8 ? dy / length : 0;
+
+                const outerIndex = positions.length / 3;
+
+                positions.push(
+                    x + nx * borderWidth,
+                    y + ny * borderWidth,
+                    z
+                );
+
+                // Extend the texture UVs to the border.
+                uvs.push(
+                    uvs[index * 2]!,
+                    uvs[index * 2 + 1]!
+                );
+
+                outerPerimeter.push(outerIndex);
+            }
+
+            // Connect the original perimeter to the outer perimeter.
+            for (let i = 0; i < perimeter.length; i++) {
+                const next = (i + 1) % perimeter.length;
+
+                const innerA = perimeter[i]!;
+                const innerB = perimeter[next]!;
+                const outerA = outerPerimeter[i]!;
+                const outerB = outerPerimeter[next]!;
+
+                indices.push(
+                    innerA, innerB, outerA,
+                    innerB, outerB, outerA
+                );
+            }
+        }
+
+        // Extrude the entire mesh downwards.
+        if (extrusionDepth > 0) {
+            const originalVertexCount = positions.length / 3;
+            const originalIndexCount = indices.length;
+
+            // Duplicate every vertex and move it downwards.
+            for (let i = 0; i < originalVertexCount; i++) {
+                const x = positions[i * 3]!;
+                const y = positions[i * 3 + 1]!;
+                const z = positions[i * 3 + 2]!;
+
+                positions.push(x, y, z - extrusionDepth);
+
+                // Copy UV coordinates.
+                uvs.push(
+                    uvs[i * 2]!,
+                    uvs[i * 2 + 1]!
+                );
+            }
+
+            // Duplicate the existing triangles for the bottom face.
+            // Reverse winding so the bottom faces point in the opposite direction.
+            for (let i = 0; i < originalIndexCount; i += 3) {
+                const a = indices[i]!;
+                const b = indices[i + 1]!;
+                const c = indices[i + 2]!;
+
+                indices.push(
+                    a + originalVertexCount,
+                    c + originalVertexCount,
+                    b + originalVertexCount
+                );
+            }
+
+            // Connect the perimeter to the duplicated perimeter.
+            if (rows >= 2 && columns >= 2) {
+                const perimeter: number[] = [];
+
+                // First row.
+                for (let col = 0; col < columns; col++) {
+                    perimeter.push(col);
+                }
+
+                // Right edge.
+                for (let row = 1; row < rows; row++) {
+                    perimeter.push(row * columns + columns - 1);
+                }
+
+                // Last row.
+                for (let col = columns - 2; col >= 0; col--) {
+                    perimeter.push((rows - 1) * columns + col);
+                }
+
+                // Left edge.
+                for (let row = rows - 2; row > 0; row--) {
+                    perimeter.push(row * columns);
+                }
+
+                // Include the outer border vertices in the perimeter.
+                // These are the vertices added by your border-generation code.
+                const borderStart = rows * columns;
+
+                const outerPerimeter: number[] = [];
+
+                for (let i = 0; i < perimeter.length; i++) {
+                    outerPerimeter.push(borderStart + i);
+                }
+
+                // The actual outer boundary is the outer perimeter,
+                // not the original LiDAR perimeter.
+                const boundary = outerPerimeter;
+
+                // Create side walls along the outer boundary.
+                for (let i = 0; i < boundary.length; i++) {
+                    const next = (i + 1) % boundary.length;
+
+                    const a = boundary[i]!;
+                    const b = boundary[next]!;
+
+                    const bottomA = a + originalVertexCount;
+                    const bottomB = b + originalVertexCount;
+
+                    indices.push(
+                        a, b, bottomA,
+                        b, bottomB, bottomA
+                    );
+                }
+            }
+        }
+
+        // Create the geometry.
         const geometry = new THREE.BufferGeometry();
 
         geometry.setAttribute(
@@ -1024,10 +1241,23 @@ class MainHandler
         geometry.setIndex(indices);
         geometry.computeVertexNormals();
 
+        // Get the material.
         let material: THREE.MeshStandardMaterial;
-        let contentMaterial = this.mainScene.getObjectByName("ContentMaterial_Helper_Mesh");
 
-        if (contentMaterial === undefined || typeof (<any>contentMaterial).material !== "object" || typeof (<any>contentMaterial).material.isMeshStandardMaterial !== "boolean") {
+        const contentMaterial = this.mainScene.getObjectByName(
+            "ContentMaterial_Helper_Mesh"
+        );
+
+        const candidate = contentMaterial as THREE.Mesh | undefined;
+        const existingMaterial = candidate?.material;
+
+        if (
+            existingMaterial &&
+            !Array.isArray(existingMaterial) &&
+            (existingMaterial as THREE.Material).type === "MeshStandardMaterial"
+        ) {
+            material = existingMaterial as THREE.MeshStandardMaterial;
+        } else {
             material = new THREE.MeshStandardMaterial({
                 color: 0x00ff88,
                 side: THREE.DoubleSide,
@@ -1036,22 +1266,250 @@ class MainHandler
                 opacity: 0.65
             });
         }
-        else
-        {
-            material = (<THREE.MeshStandardMaterial>(<any>contentMaterial).material)
+
+        if (material.map) {
+            material.map.wrapS = THREE.RepeatWrapping;
+            material.map.wrapT = THREE.RepeatWrapping;
+            material.map.repeat.set(columns, rows);
+            material.map.needsUpdate = true;
         }
 
-        material.map!.wrapS = THREE.RepeatWrapping;
-        material.map!.wrapT = THREE.RepeatWrapping;
-
-        material.map!.repeat.set(8, 8); // Repeat texture 10x horizontally and vertically
-        material.map!.needsUpdate = true;
-
-        const mesh = new THREE.Mesh(geometry, material);
-
-        return mesh;
+        return new THREE.Mesh(geometry, material);
     }
     // #endregion
+
+    private IntersectMeshes(
+        lidarMesh: THREE.Mesh,
+        containerMesh: THREE.Mesh
+    ): THREE.Mesh {
+        lidarMesh.updateWorldMatrix(true, false);
+        containerMesh.updateWorldMatrix(true, false);
+        this.mainScene.updateWorldMatrix(true, false);
+
+        const createWorldGeometry = (
+            mesh: THREE.Mesh,
+            name: string
+        ): THREE.BufferGeometry => {
+            const geometry = mesh.geometry.clone();
+            geometry.name = name;
+
+            // Bake the complete mesh world transform into the geometry.
+            geometry.applyMatrix4(mesh.matrixWorld);
+
+            // Ensure triangles are explicitly indexed.
+            if (!geometry.index) {
+                const position = geometry.getAttribute("position");
+                const indices: number[] = [];
+
+                for (let i = 0; i + 2 < position.count; i += 3) {
+                    indices.push(i, i + 1, i + 2);
+                }
+
+                geometry.setIndex(indices);
+            }
+
+            geometry.deleteAttribute("normal");
+            geometry.computeVertexNormals();
+            geometry.computeBoundingBox();
+            geometry.computeBoundingSphere();
+
+            return geometry;
+        };
+
+        const calculateSignedVolume = (
+            geometry: THREE.BufferGeometry
+        ): number => {
+            const position = geometry.getAttribute("position");
+            const index = geometry.index;
+
+            if (!position || !index) {
+                return 0;
+            }
+
+            const a = new THREE.Vector3();
+            const b = new THREE.Vector3();
+            const c = new THREE.Vector3();
+            const cross = new THREE.Vector3();
+
+            let volume = 0;
+
+            for (let i = 0; i + 2 < index.count; i += 3) {
+                a.fromBufferAttribute(position, index.getX(i));
+                b.fromBufferAttribute(position, index.getX(i + 1));
+                c.fromBufferAttribute(position, index.getX(i + 2));
+
+                volume += a.dot(cross.crossVectors(b, c)) / 6;
+            }
+
+            return volume;
+        };
+
+        const reverseTriangleWinding = (
+            geometry: THREE.BufferGeometry
+        ): void => {
+            const index = geometry.index;
+
+            if (!index) {
+                return;
+            }
+
+            for (let i = 0; i + 2 < index.count; i += 3) {
+                const second = index.getX(i + 1);
+                const third = index.getX(i + 2);
+
+                index.setX(i + 1, third);
+                index.setX(i + 2, second);
+            }
+
+            index.needsUpdate = true;
+
+            geometry.deleteAttribute("normal");
+            geometry.computeVertexNormals();
+            geometry.computeBoundingBox();
+            geometry.computeBoundingSphere();
+        };
+
+        const lidarGeometry = createWorldGeometry(
+            lidarMesh,
+            "LIDAR"
+        );
+
+        const containerGeometry = createWorldGeometry(
+            containerMesh,
+            "CONTAINER"
+        );
+
+        const lidarVolume = calculateSignedVolume(lidarGeometry);
+        const containerVolume = calculateSignedVolume(containerGeometry);
+
+        // Reverse inward-facing closed meshes.
+        if (lidarVolume < 0) {
+            reverseTriangleWinding(lidarGeometry);
+        }
+
+        if (containerVolume < 0) {
+            reverseTriangleWinding(containerGeometry);
+        }
+
+        // The brushes now contain world-space vertices.
+        // Keep their transforms at identity to avoid applying transforms twice.
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x00ff88,
+            side: THREE.DoubleSide
+        });
+
+        const lidarBrush = new Brush(lidarGeometry, material);
+        const containerBrush = new Brush(containerGeometry, material);
+
+        lidarBrush.position.set(0, 0, 0);
+        lidarBrush.rotation.set(0, 0, 0);
+        lidarBrush.scale.set(1, 1, 1);
+        lidarBrush.updateMatrix();
+        lidarBrush.updateMatrixWorld(true);
+
+        containerBrush.position.set(0, 0, 0);
+        containerBrush.rotation.set(0, 0, 0);
+        containerBrush.scale.set(1, 1, 1);
+        containerBrush.updateMatrix();
+        containerBrush.updateMatrixWorld(true);
+
+        const evaluator = new Evaluator();
+
+        const result = evaluator.evaluate(
+            containerBrush,
+            lidarBrush,
+            INTERSECTION
+        );
+
+        const resultGeometry = result.geometry;
+
+        resultGeometry.computeBoundingBox();
+        resultGeometry.computeBoundingSphere();
+
+        const resultBounds = resultGeometry.boundingBox;
+
+        if (
+            !resultBounds ||
+            !Number.isFinite(resultBounds.min.x) ||
+            resultGeometry.getAttribute("position").count === 0
+        ) {
+            lidarGeometry.dispose();
+            containerGeometry.dispose();
+            material.dispose();
+
+            throw new Error(
+                "CSG intersection returned empty or invalid geometry."
+            );
+        }
+
+        // Convert world-space intersection vertices into scene-local space.
+        const inverseSceneWorld = this.mainScene.matrixWorld
+            .clone()
+            .invert();
+
+        resultGeometry.applyMatrix4(inverseSceneWorld);
+        resultGeometry.deleteAttribute("normal");
+        resultGeometry.computeVertexNormals();
+        resultGeometry.computeBoundingBox();
+        resultGeometry.computeBoundingSphere();
+
+
+
+
+
+
+
+
+
+
+        let material2: THREE.MeshStandardMaterial;
+    
+        const contentMaterial = this.mainScene.getObjectByName(
+            "ContentMaterial_Helper_Mesh"
+        );
+
+        const candidate = contentMaterial as THREE.Mesh | undefined;
+        const existingMaterial = candidate?.material;
+
+        if (
+            existingMaterial &&
+            !Array.isArray(existingMaterial) &&
+            (existingMaterial as THREE.Material).type === "MeshStandardMaterial"
+        ) {
+            material2 = existingMaterial as THREE.MeshStandardMaterial;
+        } else {
+            material2 = new THREE.MeshStandardMaterial({
+                color: 0x00ff88,
+                side: THREE.DoubleSide,
+                wireframe: false,
+                transparent: true,
+                opacity: 0.65
+            });
+        }
+
+        // if (material2.map) {
+        //     material2.map.wrapS = THREE.RepeatWrapping;
+        //     material2.map.wrapT = THREE.RepeatWrapping;
+        //     material2.map.repeat.set(columns, rows);
+        //     material2.map.needsUpdate = true;
+        // }
+
+        result.material = material2;
+
+        result.material.needsUpdate = true;
+
+        result.position.set(0, 0, 0);
+        result.quaternion.identity();
+        result.scale.set(1, 1, 1);
+        result.updateMatrix();
+        result.updateMatrixWorld(true);
+
+        lidarGeometry.dispose();
+        containerGeometry.dispose();
+        material.dispose();
+
+        return result;
+    }
 
     // #region GetDistanceFromCeilingFloor
     /**
