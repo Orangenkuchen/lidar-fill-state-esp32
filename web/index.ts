@@ -260,8 +260,8 @@ class MainHandler
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1;
 
-        console.debug("3D-model: Adding a ambient light at %i%...", 45);
-        let ambientLight = new THREE.AmbientLight(0xFFFFFF, 0.45);
+        console.debug("3D-model: Adding a ambient light at %i%...", 60);
+        let ambientLight = new THREE.AmbientLight(0xFFFFFF, 0.60);
         this.mainScene.add(ambientLight);
 
         let handleOnResize = () => { this.HandleOnResize(); };
@@ -285,7 +285,7 @@ class MainHandler
             }
         );
 
-        console.log(this.lidarCameraName);
+        this.window.addEventListener("resize", () => { this.HandleOnResize(); });
         this.HandleOnResize();
     }
     // #endregion

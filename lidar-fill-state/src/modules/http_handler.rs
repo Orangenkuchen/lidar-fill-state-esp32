@@ -59,6 +59,10 @@ const HTTP_SWAGGER_HTML: &'static [u8] = gzip_bytes!("../web/swagger/index.html"
 const HTTP_OPENAPI_JSON: &'static [u8] = gzip_bytes!("../web/swagger/openapi.json");
 /// The html of the settings saved page
 const HTTP_SETTINGS_SAVE_SUCCESS_HTML: &'static [u8] = gzip_bytes!("../web/settings_success.html");
+/// The SVG of the FavIcon
+const HTTP_FAV_SVG: &'static [u8] = gzip_bytes!("../FavIcon.svg");
+/// The Webmanifest of the web site
+const HTTP_WEBMANIFEST: &'static [u8] = gzip_bytes!("../web/manifest.webmanifest");
 /// The Path of the 3D-Model in the filesystem
 const GLB_FILE_PATH: &str = "Model.glb";
 /// The Path of the Settings-File in the filesystem
@@ -1390,6 +1394,16 @@ impl Handler for HttpHandler {
                         conn,
                         "image/x-icon",
                         HTTP_FAV_ICON
+                    ).await,
+                    (Method::Get, "/assets/favicon.svg") => self.serve_static_content(
+                        conn,
+                        "image/svg+xml",
+                        HTTP_FAV_SVG
+                    ).await,
+                    (Method::Get, "/manifest.webmanifest") => self.serve_static_content(
+                        conn,
+                        "application/manifest+json",
+                        HTTP_WEBMANIFEST
                     ).await,
                     (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
                     (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,

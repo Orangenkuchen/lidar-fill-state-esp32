@@ -1,0 +1,44 @@
+{
+  "name": "Lidar-Fill-State",
+  "short_name": "Lidar-Fill",
+  "default_locale": "de-DE",
+  "orientation": "any",
+  "theme_color": "#00ff16",
+  "background_color": "#1d1d1d",
+  "display_override": ["fullscreen", "minimal-ui"],
+  "display": "standalone",
+  "scope": "/",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "assets/favicon.svg",
+      "type": "image/svg",
+      "size": "96x96",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/favicon.svg",
+      "type": "image/svg",
+      "size": "144x144",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/favicon.svg",
+      "type": "image/svg",
+      "size": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/favicon.svg",
+      "type": "image/svg",
+      "size": "256x256",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/favicon.svg",
+      "type": "image/svg",
+      "size": "512x512",
+      "purpose": "any"
+    }
+  ]
+}

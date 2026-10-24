@@ -371,14 +371,18 @@ progress::-moz-progress-bar {
     }
 }
 
-@media (max-width:500px) {
+@media (max-width:800px) {
     .MainHeader {
         gap: 10px;
 
         a.Title {
             div.Text {
-                font-size: 20px;
+                font-size: 13px;
             }
+        }
+
+        a.Breadcrumb {
+            font-size: 16px;
         }
     }
 
@@ -388,6 +392,14 @@ progress::-moz-progress-bar {
 
             .StatsBox {
                 --height: 116px;
+
+                .Subtext {
+                    font-size: 12px;
+                }
+
+                .Footer {
+                    font-size: 10px;
+                }
 
                 .Value {
                     line-height: 36px;
