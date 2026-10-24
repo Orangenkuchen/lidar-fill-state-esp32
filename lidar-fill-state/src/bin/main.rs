@@ -4,7 +4,6 @@
 // The entrypoint is provided by #[esp_rtos::main].
 #![no_main]
 
-use core::fmt::{Write as FmtWrite};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use edge_http::{
@@ -26,7 +25,6 @@ use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
 use lidar_fill_state::modules::vl53l8cx_lidar_service::{
     CheckForNewDataError,
     InitError,
-    LidarReading,
     LidarReadingWatch,
     StartRangingError,
     StopRangingError,
@@ -76,10 +74,23 @@ use littlefs_rust::{
 };
 use esp_storage::FlashStorage;
 use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    blocking_mutex::raw::{NoopRawMutex},
+    signal::Signal,
     mutex::Mutex,
-    watch::{Receiver, Watch},
+    watch::{Watch},
 };
+
+use core::net::{Ipv4Addr, Ipv6Addr};
+
+use edge_mdns::{
+    buf::VecBufAccess,
+    domain::base::Ttl,
+    host::Host,
+    io::{self, MdnsIoError, IPV4_DEFAULT_SOCKET},
+    HostAnswersMdnsHandler,
+};
+use edge_nal::UdpSplit;
+use edge_nal_embassy::{Udp, UdpBuffers};
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,6 +127,16 @@ const RUN_WEBSERVER_WITH_SOCKETS: usize =
 const TCP_BUFFER_N: usize = STACK_SOCKETS;
 const TCP_BUFFER_SEND_SIZE: usize = 2048;
 const TCP_BUFFER_RECEIVE_SIZE: usize = 512;
+const MDNS_HOSTNAME: &str = match option_env!("MDNS_HOSTNAME") {
+    Some(value) => value,
+    None => "esp32-sensor",
+};
+const MDNS_TTL_SECONDS: u32 = 60;
+const MDNS_BUFFER_SIZE: usize = 512;
+
+// One UDP socket for mDNS. The stack has capacity for 13 sockets.
+static MDNS_UDP_BUFFERS: StaticCell<UdpBuffers<1, 512, 512>> =
+    StaticCell::new();
 
 /// If true the lidar will start the ranging measurment. If it switches to false the measument will stop
 static LIDAR_RUN_STATE: AtomicBool = AtomicBool::new(false);
@@ -244,7 +265,6 @@ async fn main(spawner: Spawner) -> ! {
     .with_scl(peripherals.GPIO7);
 
     let reading_watch = LIDAR_READING.init(Watch::new());
-    let receiver = reading_watch.receiver().unwrap();
 
     let mut lidar_service = VL53L8CxLidarService::new(i2c, reading_watch);
     match lidar_service.init() {
@@ -263,9 +283,6 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(
         sensor_task(lidar_service).expect("failed to spawn sensor task")
-    );
-    spawner.spawn(
-        lidar_receiver_task(receiver).expect("failed to spawn lidar receiver task")
     );
 
     // START NETWORK TASK
@@ -291,6 +308,13 @@ async fn main(spawner: Spawner) -> ! {
     if let Some(config) = network_components.stack.config_v4() {
         trace!("Received IPv4 config from DHCP: IP = {}", config.address);
     }
+
+    debug!("Spawning mDNS responder...");
+    spawner.spawn(
+        mdns_task(network_components.stack)
+            .expect("failed to spawn mDNS task"),
+    );
+    trace!("mDNS tasked spawned.");
 
     debug!("Spawning a task for the web-server...");
     let tcp_buffers =
@@ -611,12 +635,6 @@ async fn web_server_task(
     }
 }
 
-// ============================================================
-// HTTP HANDLER
-// ============================================================
-
-
-
 /// Generates the RMT data for a WS2812.
 ///
 /// The LED expects:
@@ -932,69 +950,6 @@ fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
     }
 }
 
-// fn to_string(enum_to_format: esp_radio::wifi::sta::DisconnectReason) -> &'static str{
-//     return match enum_to_format {
-//         DisconnectReason::AccessPointInitiatedDisassociation => "AccessPointInitiatedDisassociation",
-//         DisconnectReason::AccessPointTsfReset => "AccessPointTsfReset",
-//         DisconnectReason::AkmpInvalid => "AkmpInvalid",
-//         DisconnectReason::AlterativeChannelOccupied => "AlterativeChannelOccupied",
-//         DisconnectReason::AssociationComebackTimeTooLong => "AssociationComebackTimeTooLong",
-//         DisconnectReason::AssociationFailed => "AssociationFailed",
-//         DisconnectReason::AssociationLeave => "AssociationLeave",
-//         DisconnectReason::AssociationNotAuthenticated => "AssociationNotAuthenticated",
-//         DisconnectReason::AssociationTooMany => "AssociationTooMany",
-//         DisconnectReason::AuthenticationExpired => "AuthenticationExpired",
-//         DisconnectReason::AuthenticationFailed => "AuthenticationFailed",
-//         DisconnectReason::AuthenticationLeave => "AuthenticationLeave",
-//         DisconnectReason::BadCipherOrAkm => "BadCipherOrAkm",
-//         DisconnectReason::BeaconTimeout => "BeaconTimeout",
-//         DisconnectReason::BssTransitionDisassociated => "BssTransitionDisassociated",
-//         DisconnectReason::CipherSuiteRejected => "CipherSuiteRejected",
-//         DisconnectReason::Class2FrameFromNonAuthenticatedStation => "Class2FrameFromNonAuthenticatedStation",
-//         DisconnectReason::Class3FrameFromNonAssociatedStation => "Class3FrameFromNonAssociatedStation",
-//         DisconnectReason::ConnectionFailed => "ConnectionFailed",
-//         DisconnectReason::DisassociatedDueToInactivity => "DisassociatedDueToInactivity",
-//         DisconnectReason::DisassociatedPowerCapabilityBad => "DisassociatedPowerCapabilityBad",
-//         DisconnectReason::DisassociatedUnsupportedChannel => "DisassociatedUnsupportedChannel",
-//         DisconnectReason::EndBlockAck => "EndBlockAck",
-//         DisconnectReason::ExceededTxOp => "ExceededTxOp",
-//         DisconnectReason::FourWayHandshakeTimeout => "FourWayHandshakeTimeout",
-//         DisconnectReason::GroupCipherInvalid => "GroupCipherInvalid",
-//         DisconnectReason::GroupKeyUpdateTimeout => "GroupKeyUpdateTimeout",
-//         DisconnectReason::IeIn4wayDiffers => "IeIn4wayDiffers",
-//         DisconnectReason::IeInvalid => "IeInvalid",
-//         DisconnectReason::InvalidFtActionFrameCount => "InvalidFtActionFrameCount",
-//         DisconnectReason::InvalidFte => "InvalidFte",
-//         DisconnectReason::InvalidMde => "InvalidMde",
-//         DisconnectReason::InvalidPmkid => "InvalidPmkid",
-//         DisconnectReason::InvalidRsnIeCapabilities => "InvalidRsnIeCapabilities",
-//         DisconnectReason::MicFailure => "MicFailure",
-//         DisconnectReason::MissingAcks => "MissingAcks",
-//         DisconnectReason::NoAccessPointFound => "NoAccessPointFound",
-//         DisconnectReason::NoAccessPointFoundInAuthmodeThreshold => "NoAccessPointFoundInAuthmodeThreshold",
-//         DisconnectReason::NoAccessPointFoundInRssiThreshold => "NoAccessPointFoundInRssiThreshold",
-//         InvalidRsnIeCapabilities => "InvalidRsnIeCapabilities",
-//         DisconnectReason::NoAccessPointFoundWithCompatibleSecurity => "NoAccessPointFoundWithCompatibleSecurity",
-//         DisconnectReason::NoSspRoamingAgreement => "NoSspRoamingAgreement",
-//         DisconnectReason::NotAuthorizedThisLocation => "NotAuthorizedThisLocation",
-//         DisconnectReason::NotEnoughBandwidth => "NotEnoughBandwidth",
-//         DisconnectReason::PairwiseCipherInvalid => "PairwiseCipherInvalid",
-//         DisconnectReason::PeerInitiated => "PeerInitiated",
-//         DisconnectReason::SaQueryTimeout => "SaQueryTimeout",
-//         DisconnectReason::ServiceChangePercludesTs => "ServiceChangePercludesTs",
-//         DisconnectReason::SspRequestedDisassociation => "SspRequestedDisassociation",
-//         DisconnectReason::StationLeaving => "StationLeaving",
-//         DisconnectReason::TdlsPeerUnreachable => "TdlsPeerUnreachable",
-//         DisconnectReason::TdlsUnspecified => "TdlsUnspecified",
-//         DisconnectReason::TransmissionLinkEstablishmentFailed => "TransmissionLinkEstablishmentFailed",
-//         DisconnectReason::UnknownBlockAck => "UnknownBlockAck",
-//         DisconnectReason::UnspecifiedQos => "UnspecifiedQos",
-//         DisconnectReason::UnsupportedRsnIeVersion => "UnsupportedRsnIeVersion",
-//         DisconnectReason::_802_1xAuthenticationFailed => "_802_1xAuthenticationFailed",
-//         _ => "Unknown"
-//     }
-// }
-
 #[embassy_executor::task]
 async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
     LIDAR_RUN_STATE.store(true, Ordering::Relaxed);
@@ -1065,42 +1020,65 @@ async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
 }
 
 #[embassy_executor::task]
-async fn lidar_receiver_task(
-    mut receiver: Receiver<'static, CriticalSectionRawMutex, LidarReading, 4>,
-) {
+pub async fn mdns_task(stack: Stack<'static>) -> ! {
     loop {
-        let reading = receiver.changed().await;
-        // info!(
-        //     "VL53L8CX distance: {} mm, status: {}, temperature: {}",
-        //     reading.zones[0].distance_mm,
-        //     reading.zones[0].target_status,
-        //     reading.silicon_temp_degc,
-        // );
+        match run_mdns(&stack).await {
+            Ok(()) => warn!("mDNS responder exited"),
+            Err(error) => error!("mDNS responder failed: {:?}", error),
+        }
 
-        // for row in 0..8 {
-        //     let mut line = heapless::String::<256>::new();
-        //     for column in 0..8 {
-        //         let zone = reading.zones[row * 8 + column];
-        //         let _ = write!(line, "{} ", left_pad(zone.distance_mm));
-        //     }
-        //     info!("{}", line);
-        // }
+        Timer::after(Duration::from_secs(2)).await;
     }
 }
 
-fn left_pad(number: i16) -> heapless::String<24> {
-    let color = match number {
-        ..=49 => "\x1b[38;5;196m",       // red
-        50..=99 => "\x1b[38;5;208m",     // orange
-        100..=199 => "\x1b[38;5;226m",   // yellow
-        200..=399 => "\x1b[38;5;46m",    // green
-        400..=799 => "\x1b[38;5;51m",    // cyan
-        800..=1599 => "\x1b[38;5;21m",   // blue
-        1600..=3900 => "\x1b[38;5;129m", // violet-blue
-        _ => "\x1b[38;5;129m",            // violet
+async fn run_mdns(
+    stack: &Stack<'static>,
+) -> Result<(), MdnsIoError<edge_nal_embassy::UdpError>> {
+    let config = stack
+        .config_v4()
+        .expect("mDNS started before DHCP configuration");
+
+    let ip = config.address.address();
+
+    info!("Starting mDNS for esp32-sensor.local at {}", ip);
+
+    let buffers = MDNS_UDP_BUFFERS.init(UdpBuffers::new());
+    let udp = Udp::new(*stack, buffers);
+
+    let mut socket = io::bind(
+        &udp,
+        IPV4_DEFAULT_SOCKET,
+        Some(Ipv4Addr::UNSPECIFIED),
+        Some(0),
+    )
+    .await?;
+
+    let (recv, send) = socket.split();
+
+    let host = Host {
+        hostname: MDNS_HOSTNAME,
+        ipv4: ip,
+        ipv6: Ipv6Addr::UNSPECIFIED,
+        ttl: Ttl::from_secs(MDNS_TTL_SECONDS),
     };
 
-    let mut padded = heapless::String::<24>::new();
-    write!(padded, "{}{:04}\x1b[0m", color, number).unwrap();
-    padded
+    let recv_buf =
+        VecBufAccess::<NoopRawMutex, MDNS_BUFFER_SIZE>::new();
+    let send_buf =
+        VecBufAccess::<NoopRawMutex, MDNS_BUFFER_SIZE>::new();
+
+    let signal = Signal::<NoopRawMutex, ()>::new();
+
+    let mdns = io::Mdns::new(
+        Some(Ipv4Addr::UNSPECIFIED),
+        Some(0),
+        recv,
+        send,
+        recv_buf,
+        send_buf,
+        Rng::new(),
+        &signal,
+    );
+
+    mdns.run(HostAnswersMdnsHandler::new(&host)).await
 }

@@ -367,6 +367,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "domain"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b68712c02bff2348323c1441ab2e8528e32af4f8f9edf29356356290328c8e6"
+dependencies = [
+ "domain-macros",
+ "heapless 0.9.3",
+ "jiff",
+ "octseq",
+]
+
+[[package]]
+name = "domain-macros"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fba8fbc4580c745dfeab102232dcb729f030ac3e2c9ff5374a9dfd6dc9ddf8e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "edge-http"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,6 +403,21 @@ dependencies = [
  "heapless 0.9.3",
  "httparse",
  "sha1_smol",
+]
+
+[[package]]
+name = "edge-mdns"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4c32f19b7b4fb455e0bc270bcfe8ca595813ea935a2606447a32fe99b0b1843"
+dependencies = [
+ "domain",
+ "edge-nal",
+ "embassy-futures",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "heapless 0.9.3",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1366,11 +1404,12 @@ dependencies = [
  "cc",
  "critical-section",
  "edge-http",
+ "edge-mdns",
  "edge-nal",
  "edge-nal-embassy",
  "embassy-executor",
  "embassy-net",
- "embassy-sync 0.7.2",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
@@ -1526,6 +1565,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "octseq"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "182eab3e1cd9cdc0ecf1ce3342d9844f3dc7d098f0694569bfdf327b612d69fd"
+dependencies = [
+ "heapless 0.9.3",
 ]
 
 [[package]]

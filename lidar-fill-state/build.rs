@@ -65,7 +65,7 @@ fn load_wifi_credentials() {
         let value = value.trim();
 
         match key {
-            "WIFI_SSID" | "WIFI_PASSWORD" => {
+            "WIFI_SSID" | "WIFI_PASSWORD" | "MDNS_HOSTNAME" => {
                 println!("cargo:rustc-env={key}={value}");
             }
             _ => {
