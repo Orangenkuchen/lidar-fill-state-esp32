@@ -157,6 +157,11 @@ class MainHandler
     private mainContainerMesh: THREE.Mesh | null;
 
     /**
+     * The main container mesh. Will only be filld after the glb is loaded.
+     */
+    private contentMesh: THREE.Mesh | null;
+
+    /**
      * The last temperature reading of the lidar. Is null at the beginning.
      */
     private lastSensorTemperature: number | null;
@@ -203,6 +208,7 @@ class MainHandler
         this.mainContainerMesh = null;
         this.lastSensorTemperature = null;
         this.lastDistanceToContainer = null;
+        this.contentMesh = null;
 
         this.window = window;
         this.containerMeshName = containerMeshName;
@@ -517,6 +523,23 @@ class MainHandler
         }
 
         return this.CalculateVolumeOfMesh(this.mainContainerMesh);
+    }
+    // #endregion
+
+    // #region CalculateContentVolume
+    /**
+     * Calculates the Volume of the ContentMesh
+     * 
+     * @returns Returns the Volume
+     */
+    public CalculateContentVolume(): number
+    {
+        if (this.contentMesh == null)
+        {
+            return 0;
+        }
+
+        return this.CalculateVolumeOfMesh(this.contentMesh);
     }
     // #endregion
 
@@ -949,23 +972,32 @@ class MainHandler
                 this.lastSensorTemperature = reading.silicon_temp_degc;
 
                 let newMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm, 10, 5);
+                let measureMesh = this.CreateLidarMesh(8, 8, verticalFov, horizontalFov, reading!.distance_mm, 0.0001, 0.0001);
 
                 newMesh.updateWorldMatrix(true, false);
                 this.mainContainerMesh!.updateWorldMatrix(true, false);
 
                 lidar.add(newMesh);
 
-                let intersectMesh = this.IntersectMeshes(newMesh, this.mainContainerMesh!);
+                this.contentMesh = this.IntersectMeshes(newMesh, this.mainContainerMesh!);
+                this.contentMesh.renderOrder = 1;
                 lidar.remove(newMesh);
                 if (lastIntersectMeshDebug != null)
                 {
                     this.mainScene.remove(lastIntersectMeshDebug);
                     lastIntersectMeshDebug = null;
                 }
-                this.mainScene.add(intersectMesh);
-                lastIntersectMeshDebug = intersectMesh;
+                this.mainScene.add(this.contentMesh);
+                lastIntersectMeshDebug = this.contentMesh;
 
-                this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(newMesh, this.mainContainerMesh!);
+                let distances = 0;
+                for (let distance of reading!.distance_mm)
+                {
+                    distances += distance;
+                }
+                lidar.add(measureMesh);
+                this.lastDistanceToContainer = this.GetDistanceFromCeilingFloor(measureMesh, this.mainContainerMesh!);
+                lidar.remove(measureMesh);
 
                 this.RaiseNewData();
             }
@@ -1110,10 +1142,18 @@ class MainHandler
                     z
                 );
 
-                // Extend the texture UVs to the border.
+                // Extend UVs according to the actual radial displacement.
+                const u = uvs[index * 2]!;
+                const v = uvs[index * 2 + 1]!;
+
+                const outerX = x + nx * borderWidth;
+                const outerY = y + ny * borderWidth;
+
+                const uvScale = 1;
+
                 uvs.push(
-                    uvs[index * 2]!,
-                    uvs[index * 2 + 1]!
+                    u + (outerX - x) * uvScale,
+                    v - (outerY - y) * uvScale
                 );
 
                 outerPerimeter.push(outerIndex);
@@ -1453,15 +1493,6 @@ class MainHandler
         resultGeometry.computeBoundingBox();
         resultGeometry.computeBoundingSphere();
 
-
-
-
-
-
-
-
-
-
         let material2: THREE.MeshStandardMaterial;
     
         const contentMaterial = this.mainScene.getObjectByName(
@@ -1486,13 +1517,6 @@ class MainHandler
                 opacity: 0.65
             });
         }
-
-        // if (material2.map) {
-        //     material2.map.wrapS = THREE.RepeatWrapping;
-        //     material2.map.wrapT = THREE.RepeatWrapping;
-        //     material2.map.repeat.set(columns, rows);
-        //     material2.map.needsUpdate = true;
-        // }
 
         result.material = material2;
 
@@ -1667,16 +1691,24 @@ function GetElementOrThrowError<TElement extends Element>(selector: string, name
     return element;
 }
 
+// The percentage at which the container is considered full.
+const maxFillPercentage: number = 0.8; // ⚠️ TODO: Move to settings
+// The amount of kilograms per cubic meter filled.
+const killograms_per_m3_filled: number = 650; // ⚠️ TODO: Move to settings
+
 let loadingProgressQuery = ".load-process";
 
 let overlayContainer = GetElementOrThrowError<HTMLElement>(".Overlay", "OverlayContainer");
 let progressElement = GetElementOrThrowError<HTMLElement>(loadingProgressQuery, "Progress");
 let loadingTextElement = GetElementOrThrowError<HTMLElement>(".load-label-percent", "LoadingText");
-// let volumeTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .Value", "Volume-Text");
+let volumeTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .Value", "Volume-Text");
 let maxVolumeTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .MaxValue", "MaxVolumeTextElement");
+let volumePercentageTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Volume .Percentage", "VolumePercentageTextElement");
 let temperatureTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .Value", "TemperatureText");
 let distanceToFloorTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .DistanceToFloor", "DistanceToFloorTextElement");
 let distanceToCeilingTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Temperature .DistanceToCeiling", "DistanceToCeilingTextElement");
+let weightTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Weight .Value", "Weight-Text");
+let maxWeightTextElement = GetElementOrThrowError<HTMLElement>(".StatsBox.Weight .MaxValue", "MaxWeightTextElement");
 
 if (progressElement instanceof HTMLProgressElement == false)
 {
@@ -1713,7 +1745,9 @@ mainHandler.AddGlbLoadingprogessEventHandler((loadingProgess) => {
 });
 
 mainHandler.AddGlbLoadedEventHandler(()  => {
-    maxVolumeTextElement.innerText = numberFormatterLong.format(mainHandler.CalculateMainContainerVolume());
+    let maxContainerVolume = mainHandler.CalculateMainContainerVolume();
+    let relaisticMaxContainerVolume = maxContainerVolume * maxFillPercentage;
+    maxVolumeTextElement.innerText = numberFormatterLong.format(relaisticMaxContainerVolume);
 });
 
 mainHandler.AddNewDataEventHandler(()  => {
@@ -1743,6 +1777,18 @@ mainHandler.AddNewDataEventHandler(()  => {
     {
         distanceToCeilingTextElement.innerText = numberFormatterLong.format(mainHandler.LastDistanceToContainer.FromCeiling);
     }
+
+    let maxContainerVolume = mainHandler.CalculateMainContainerVolume();
+    let relaisticMaxContainerVolume = maxContainerVolume * maxFillPercentage;
+    let filledAmountM3 = mainHandler.CalculateContentVolume();
+    let filledPercentage = filledAmountM3 / relaisticMaxContainerVolume;
+
+    volumeTextElement.innerText = numberFormatterLong.format(filledAmountM3);
+    volumePercentageTextElement.innerText = numberFormatterNoDecimals.format(filledPercentage * 100);
+
+    let relaisticMaxContainerWeightInTons = (relaisticMaxContainerVolume * killograms_per_m3_filled) / 1000;
+    weightTextElement.innerText = numberFormatterLong.format(relaisticMaxContainerWeightInTons * filledPercentage);
+    maxWeightTextElement.innerText = numberFormatterLong.format(relaisticMaxContainerWeightInTons);
 });
 
 mainHandler.InitializeRender();

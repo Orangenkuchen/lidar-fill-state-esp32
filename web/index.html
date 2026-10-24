@@ -10,13 +10,15 @@
         <link href="https://fonts.googleapis.com/css2?family=Noto+Color+Emoji&family=Ubuntu:wght@300;400&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="/assets/base_style.css">
         <script type="importmap">
-            {
-                "imports": {
-                    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-                    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-                    "three/addons/libs/stats.module.js": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/stats.module.js"
-                }
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+                "three/addons/libs/stats.module.js": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/stats.module.js",
+                "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.10/build/index.module.js",
+                "three-bvh-csg": "https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.17/build/index.module.js"
             }
+        }
         </script>
         <script type="module" src="/index.js"></script>
     </head>
@@ -37,35 +39,52 @@
                 <div class="StatsBox Volume">
                     <div class="CenterText">
                         <span class="Value">99</span>
-                        <span> m³</span>
+                        <span>&nbsp;m³</span>
                     </div>
                     <div class="Subtext">Füllmasse</div>
+                    <div class="Footer">
+                        <div>
+                            <span>Füllstand:</span>
+                            <span class="Percentage">0</span>
+                            <span>&nbsp;%</span></div>
+                        <div>
+                            <span>Max:</span>
+                            <span class="MaxValue">0</span>
+                            <span>&nbsp;m³</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="StatsBox Weight">
+                    <div class="CenterText">
+                        <span class="Value">99</span>
+                        <span>&nbsp;t</span>
+                    </div>
+                    <div class="Subtext">Gewicht</div>
                     <div class="Footer">
                         <div></div>
                         <div>
                             <span>Max:</span>
                             <span class="MaxValue">0</span>
-                            <span> m³</span>
+                            <span>&nbsp;t</span>
                         </div>
                     </div>
                 </div>
-                <div class="StatsBox">Test</div>
                 <div class="StatsBox Temperature">
                     <div class="CenterText">
                         <span class="Value">99</span>
-                        <span> °C</span>
+                        <span>&nbsp;°C</span>
                     </div>
                     <div class="Subtext">Temperatur (am Sensor)</div>
                     <div class="Footer">
                         <div>
                             <span>Vom Boden:</span>
                             <span class="DistanceToFloor">0</span>
-                            <span> m</span>
+                            <span>&nbsp;m</span>
                         </div>
                         <div>
                             <span>Zur Decke:</span>
                             <span class="DistanceToCeiling">0</span>
-                            <span> m</span>
+                            <span>&nbsp;m</span>
                         </div>
                     </div>
                 </div>

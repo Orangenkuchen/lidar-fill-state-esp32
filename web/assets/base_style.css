@@ -255,6 +255,8 @@ progress::-moz-progress-bar {
     flex-direction: column;
     gap: 10px;
 
+    transition: 100ms;
+
     .StatsContainer {
         padding: 10px;
 
@@ -272,7 +274,7 @@ progress::-moz-progress-bar {
             --height: 132px;
             height: var(--height);
 
-            flex-basis: 180px;
+            flex-basis: 140px;
 
             background-color: var(--container-background-color);
 
@@ -382,9 +384,13 @@ progress::-moz-progress-bar {
 
     .MainContent {
         .StatsContainer {
+            padding: 5px;
+
             .StatsBox {
+                --height: 116px;
+
                 .Value {
-                    line-height: 68px;
+                    line-height: 36px;
                     font-size: 35px;
                 }
             }

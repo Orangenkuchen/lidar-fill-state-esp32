@@ -152,8 +152,16 @@ impl HttpHandler {
         let size = match filemanager.get_3dmodel_size::<HTTP_CONNECTION_BUFFER_SIZE>().await {
             Ok(size) => size,
             Err(error) => {
-                error!("handle_get_model3d > Error while getting the file size: {}", error);
-                return self.setup_500_code_on_connection(conn, None).await;
+                match error {
+                    Error::NoEntry => {
+                        info!("handle_get_model3d > Model not found in the file system. Returing 404...");
+                        return self.setup_474_element_not_found(conn).await;
+                    }
+                    _ => {
+                        error!("handle_get_model3d > Error while getting the file size: {}", error);
+                        return self.setup_500_code_on_connection(conn, None).await;
+                    }
+                }
             }
         };
         trace!("handle_get_model3d > File size was received ({}).", size);
@@ -1230,6 +1238,36 @@ impl HttpHandler {
             }
         };
         trace!("setup_400_code_json_inavalid > Text was written. Request completed.");
+
+        return Ok(());
+    }
+
+    /// Setts the http code 474 on the connection
+    /// 
+    /// ## Parameters 
+    /// - conn: The connection to write the code to
+    async fn setup_474_element_not_found<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        debug!("setup_474_element_not_found > Was called...");
+
+        debug!("setup_474_element_not_found > Element not found. Initialising 474...");
+        match conn.initiate_response(
+            474,
+            Some("Element Not Found"),
+            &[],
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("setup_474_element_not_found > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("setup_474_element_not_found > Response was initialized.");
 
         return Ok(());
     }
