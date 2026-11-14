@@ -141,6 +141,12 @@ const MDNS_HOSTNAME: &str = match option_env!("MDNS_HOSTNAME") {
     Some(value) => value,
     None => "esp32-sensor",
 };
+/// The name of the device. It will be displayed in the router and can be
+/// accessed by this name in the browser
+const DEVICE_NAME: &str = match option_env!("DEVICE_NAME") {
+    Some(value) => value,
+    None => "esp32-sensor",
+};
 const MDNS_TTL_SECONDS: u32 = 60;
 const MDNS_BUFFER_SIZE: usize = 512;
 
@@ -412,9 +418,15 @@ fn setup_network<'a>(wifi: WIFI<'static>) -> NetworkComponents<'a> {
     let wifi_interface =
         Interface::station();
 
-    // Ask the router for an IPv4 address using DHCP.
-    let net_config =
-        NetConfig::dhcpv4(Default::default());
+
+
+    debug!("Using the hostname {} when asking for an IPv4 address using dhcp.", DEVICE_NAME);
+    let mut dhcp_config = embassy_net::DhcpConfig::default();
+    dhcp_config.hostname = Some(
+        heapless::String::try_from(DEVICE_NAME).unwrap()
+    );
+
+    let net_config = NetConfig::dhcpv4(dhcp_config);
 
     // Create a random seed for the network stack.
     let rng = Rng::new();
