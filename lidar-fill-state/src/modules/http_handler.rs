@@ -435,7 +435,7 @@ impl HttpHandler {
                 f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
                 f.member(
                     "last_read_timestamp_ms",
-                    lidar_reading.last_read_timestamp.as_millis(),
+                    lidar_reading.last_read_timestamp.to_string(),
                 )?;
                 f.member("zones", nojson::json(|f| {
                     f.array(|f| {
@@ -526,8 +526,8 @@ impl HttpHandler {
             f.object(|f| {
                 f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
                 f.member(
-                    "last_read_timestamp_ms",
-                    lidar_reading.last_read_timestamp.as_millis(),
+                    "last_read_timestamp",
+                    lidar_reading.last_read_timestamp.to_string(),
                 )?;
                 f.member("distance_mm", distances)
             })
@@ -603,7 +603,7 @@ impl HttpHandler {
                 f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
                 f.member(
                     "last_read_timestamp_ms",
-                    lidar_reading.last_read_timestamp.as_millis(),
+                    lidar_reading.last_read_timestamp.to_string(),
                 )?;
                 f.member("distance_mm", distances)
             })
@@ -755,7 +755,7 @@ impl HttpHandler {
             trace!("save_settings_from_connection > The settings were parsed.");
         }
         else if content_type_header == Some("application/x-www-form-urlencoded") {
-            let parse_result = parse_www__form_urlencoded_from_reader::<HTTP_JSON_REQUEST_MAX_SIZE, _, _, _>(
+            let parse_result = parse_www_form_urlencoded_from_reader::<HTTP_JSON_REQUEST_MAX_SIZE, _, _, _>(
                 conn,
                 parse_settings_from_www_form,
             ).await;
@@ -1623,7 +1623,7 @@ where
 /// ## Parameters
 /// - reader: The async reader to read from
 /// - callback: The Function for parsing the www-form-urlencoded to the targetobject
-async fn parse_www__form_urlencoded_from_reader<const BUFFER_SIZE: usize, R, TResult, B>(
+async fn parse_www_form_urlencoded_from_reader<const BUFFER_SIZE: usize, R, TResult, B>(
     reader: &mut R,
     callback: B,
 ) -> Result<TResult, WwwFormParseError>

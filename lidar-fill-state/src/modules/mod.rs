@@ -4,3 +4,4 @@ pub mod vl53l8cx_lidar_service;
 pub mod glb_reader;
 pub mod file_manager;
 pub mod html_form;
+pub mod clock;

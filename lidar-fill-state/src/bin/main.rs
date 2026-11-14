@@ -19,6 +19,7 @@ use edge_nal_embassy::{
     TcpBuffers,
 };
 use esp_radio::wifi::DisconnectReason;
+use lidar_fill_state::modules::clock::CLOCK;
 use lidar_fill_state::modules::file_manager::FileManager;
 use lidar_fill_state::modules::http_handler::{HttpHandler, LidarJsonResponseBuffer};
 use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
@@ -37,6 +38,10 @@ use embassy_net::{
     Runner,
     Stack,
     StackResources,
+    udp:: {
+        UdpSocket,
+        PacketMetadata
+    }
 };
 use embassy_time::{Duration, Timer};
 use esp_hal::{
@@ -80,7 +85,7 @@ use embassy_sync::{
     watch::{Watch},
 };
 
-use core::net::{Ipv4Addr, Ipv6Addr};
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
 use edge_mdns::{
     buf::VecBufAccess,
@@ -92,6 +97,10 @@ use edge_mdns::{
 use edge_nal::UdpSplit;
 use edge_nal_embassy::{Udp, UdpBuffers};
 
+use sntpc::{get_time, NtpContext};
+use sntpc_net_embassy::UdpSocketWrapper;
+use sntpc_time_embassy::EmbassyTimestampGenerator;
+
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SystemState {
@@ -99,6 +108,7 @@ enum SystemState {
     Running = 1,
     WifiError = 2,
     SensorError = 3,
+    Panic = 4
 }
 
 /// The size of a storage block
@@ -114,10 +124,10 @@ const WIFI_SSID: &str = env!("WIFI_SSID");
 /// The wifi password to use
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
-const STACK_SOCKETS: usize = 13;
+const STACK_SOCKETS: usize = 16;
 
 // Reserve capacity for the HTTP server's own socket usage.
-const RESERVED_SOCKETS: usize = 3;
+const RESERVED_SOCKETS: usize = 6;
 
 // This coresponds to the amounts of web-requests the server can accept at the same time.
 // Need a free tcp-buffer too per connection
@@ -158,18 +168,27 @@ static TCP_BUFFERS: StaticCell<TcpBuffers<TCP_BUFFER_N, TCP_BUFFER_SEND_SIZE, TC
 static LIDAR_READING: StaticCell<LidarReadingWatch> = StaticCell::new();
 static LIDAR_JSON_RESPONSE: StaticCell<LidarJsonResponseBuffer> = StaticCell::new();
 
+// region: panic
+/// Will be called when the esp32 encounters a panic
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_println::println!("PANIC: {}", info);
+
+    SYSTEM_STATE.store(
+        SystemState::Panic as u8,
+        Ordering::Relaxed,
+    );
 
     loop {
         core::hint::spin_loop();
     }
 }
+// endregion
 
 // Put the application metadata into the firmware in the format the ESP32 bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
+// region: main
 /// The main program
 #[esp_rtos::main] // This macro sets up the ESP RTOS/Embassy runtime.
 async fn main(spawner: Spawner) -> ! {
@@ -309,12 +328,19 @@ async fn main(spawner: Spawner) -> ! {
         trace!("Received IPv4 config from DHCP: IP = {}", config.address);
     }
 
+    debug!("Spawning NTP task...");
+    spawner.spawn(
+        ntp_task(network_components.stack)
+            .expect("failed to spawn NTP task"),
+    );
+    trace!("NTP task spawned.");
+
     debug!("Spawning mDNS responder...");
     spawner.spawn(
         mdns_task(network_components.stack)
             .expect("failed to spawn mDNS task"),
     );
-    trace!("mDNS tasked spawned.");
+    trace!("mDNS task spawned.");
 
     debug!("Spawning a task for the web-server...");
     let tcp_buffers =
@@ -354,7 +380,9 @@ async fn main(spawner: Spawner) -> ! {
         ).await;
     }
 }
+// endregion
 
+// region: setup_network
 /// Sets the wifi and network-stack up and returns it
 fn setup_network<'a>(wifi: WIFI<'static>) -> NetworkComponents<'a> {
     // Configure the ESP32 as a Wi-Fi station.
@@ -422,7 +450,9 @@ fn setup_network<'a>(wifi: WIFI<'static>) -> NetworkComponents<'a> {
         wifi_controller: wifi_controller
     }
 }
+// endregion
 
+// region: led_task
 /// This Task controls the RGB-LED and shows the state of the programm
 #[embassy_executor::task]
 async fn led_task(
@@ -434,9 +464,10 @@ async fn led_task(
             1 => SystemState::Running,
             2 => SystemState::WifiError,
             3 => SystemState::SensorError,
+            4 => SystemState::Panic,
             _ => SystemState::Starting,
         };
-        
+
         let led_sequence: Vec<LedFlash, 10> = match state {
             SystemState::WifiError => {
                 [
@@ -449,6 +480,12 @@ async fn led_task(
                 [
                     LedFlash { r: 0x0, g: 0x05, b: 0x00, duration: Duration::from_millis(500) },
                     LedFlash { r: 0x02, g: 0x05, b: 0x02, duration: Duration::from_millis(500) }
+                ].into()
+            }
+            SystemState::Panic => {
+                [
+                    LedFlash { r: 0x05, g: 0x00, b: 0x00, duration: Duration::from_millis(1000) },
+                    LedFlash { r: 0x05, g: 0x02, b: 0x02, duration: Duration::from_millis(1000) }
                 ].into()
             }
 
@@ -466,7 +503,9 @@ async fn led_task(
         ).await;
     }
 }
+// endregion
 
+// region: wifi_task
 /// This Task continously tries to connect connect to the Wifi.
 /// On a disconnect it tries to reconnect.
 #[embassy_executor::task]
@@ -566,7 +605,9 @@ async fn wifi_task(
         Timer::after(retry_timeout_duration).await;
     }
 }
+// endregion
 
+// region: net_task
 /// This Task keeps the network-card running
 #[embassy_executor::task]
 async fn net_task(
@@ -577,7 +618,9 @@ async fn net_task(
     // It must keep running for TCP/IP to work.
     runner.run().await
 }
+// endregion
 
+// region: web_server_task
 /// This Task keeps the web-server running (observing the port 80 and sending responses)
 #[embassy_executor::task]
 async fn web_server_task(
@@ -634,7 +677,9 @@ async fn web_server_task(
         Timer::after(Duration::from_secs(1)).await;
     }
 }
+// endregion
 
+// region: ws2812_data
 /// Generates the RMT data for a WS2812.
 ///
 /// The LED expects:
@@ -772,7 +817,9 @@ fn ws2812_data(
 
     data
 }
+// endregion
 
+// region: show_led_sequence
 /// Sendet an die LED die übergebene Farb-Sequenz
 async fn show_led_sequence(
     channel: &mut Channel<'static, esp_hal::Async, Tx>,
@@ -789,20 +836,26 @@ async fn show_led_sequence(
         Timer::after(led_flash.duration).await;
     }
 }
+// endregion
 
+// region: struct LedFlash
 struct LedFlash {
     r: u8,
     g: u8,
     b: u8,
     duration: Duration
 }
+// endregion
 
+// region: struct NetworkComponents
 struct NetworkComponents<'a> {
     runner: Runner<'static, Interface>,
     wifi_controller: WifiController<'a>,
     stack: Stack<'a>
 }
+// endregion
 
+// region: init_filesystem
 fn init_filesystem(
     flash: esp_hal::peripherals::FLASH<'static>,
 ) -> Filesystem<LittleFsStorage<'static>> {
@@ -855,12 +908,14 @@ fn init_filesystem(
         }
     }
 }
+// endregion
 
 static FILESYSTEM: StaticCell<
     Mutex<NoopRawMutex, Filesystem<LittleFsStorage<'static>>>
 > = StaticCell::new();
 static FILE_MANAGER: StaticCell<Mutex<NoopRawMutex, FileManager>> = StaticCell::new();
 
+// region: log_heap_usage
 fn log_heap_usage() {
     let used = esp_alloc::HEAP.used();
     let free = esp_alloc::HEAP.free();
@@ -878,7 +933,9 @@ fn log_heap_usage() {
         used * 100 / total
     );
 }
+// endregion
 
+// region: log_static_sizes
 fn log_static_sizes() {
     info!(
         "Static sizes: StackResources={} B, TcpBuffers={} B, Filesystem={} B",
@@ -887,7 +944,9 @@ fn log_static_sizes() {
         size_of::<Filesystem<LittleFsStorage<'static>>>(),
     );
 }
+// endregion
 
+// region: to_string
 fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
     return match enum_to_format {
         DisconnectReason::AccessPointInitiatedDisassociation => "AccessPointInitiatedDisassociation",
@@ -949,7 +1008,9 @@ fn to_string(enum_to_format: esp_radio::wifi::DisconnectReason) -> &'static str{
         _ => "Unknown"
     }
 }
+// endregion
 
+// region: sensor_task
 #[embassy_executor::task]
 async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
     LIDAR_RUN_STATE.store(true, Ordering::Relaxed);
@@ -997,7 +1058,7 @@ async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
         }
 
         if lidar_service.is_running {
-            match lidar_service.check_for_new_data() {
+            match lidar_service.check_for_new_data().await {
                 Ok(_) => {},
                 Err(error) => {
                     match error {
@@ -1018,7 +1079,9 @@ async fn sensor_task(mut lidar_service: VL53L8CxLidarService) {
         Timer::after(Duration::from_millis(20)).await;
     }
 }
+// endregion
 
+// region: mdns_task
 #[embassy_executor::task]
 pub async fn mdns_task(stack: Stack<'static>) -> ! {
     loop {
@@ -1030,7 +1093,9 @@ pub async fn mdns_task(stack: Stack<'static>) -> ! {
         Timer::after(Duration::from_secs(2)).await;
     }
 }
+// endregion
 
+// region: run_mdns
 async fn run_mdns(
     stack: &Stack<'static>,
 ) -> Result<(), MdnsIoError<edge_nal_embassy::UdpError>> {
@@ -1082,3 +1147,109 @@ async fn run_mdns(
 
     mdns.run(HostAnswersMdnsHandler::new(&host)).await
 }
+// endregion
+
+// region: ntp_task
+#[embassy_executor::task]
+pub async fn ntp_task(stack: Stack<'static>) -> ! {
+    loop {
+        match sync_time_from_ntp(stack).await {
+            Ok(ntp_result) => {
+                CLOCK.set_unix_time(ntp_result.seconds, 0).await;
+                log::info!("Clock synchronized: {}", ntp_result.seconds);
+            }
+            Err(err) => match err {
+                NtpError::NoGateway => log::warn!("NTP could not be received beause the networkstack has no gateway to get it from."),
+                NtpError::UdpBindFailed { error } => log::warn!(
+                    "NTP couldn't be get because udp bind failed: {}",
+                    match error {
+                        embassy_net::udp::BindError::NoRoute => "NoRoute",
+                        embassy_net::udp::BindError::InvalidState => "InvalidState"
+                    }),
+                NtpError::GetTimeError { error } => {
+                    let error_enum_string = match error {
+                        sntpc::Error::IncorrectOriginTimestamp => "IncorrectOriginTimestamp",
+                        sntpc::Error::IncorrectMode => "IncorrectMode",
+                        sntpc::Error::UnsynchronizedClock => "UnsynchronizedClock",
+                        sntpc::Error::InvalidTimestamp => "InvalidTimestamp",
+                        sntpc::Error::ExcessiveRootDistance => "ExcessiveRootDistance",
+                        sntpc::Error::BackwardReferenceTimestamp => "BackwardReferenceTimestamp",
+                        sntpc::Error::IncorrectResponseVersion => "IncorrectResponseVersion",
+                        sntpc::Error::IncorrectStratumHeaders => "IncorrectStratumHeaders",
+                        sntpc::Error::IncorrectPayload => "IncorrectPayload",
+                        sntpc::Error::Network => "Network",
+                        sntpc::Error::AddressResolve => "AddressResolve",
+                        sntpc::Error::ResponseAddressMismatch => "ResponseAddressMismatch",
+                        sntpc::Error::KissOfDeath(_) => "KissOfDeath",
+                        _ => "Unkown error"
+                    };
+                    
+                    log::warn!("NTP couldn't be recevied because an error occured: {}", error_enum_string);
+                }
+            }
+        }
+
+        Timer::after(Duration::from_secs(60 * 5)).await;
+    }
+}
+// endregion
+
+/// The errors that can happen when NTP tryies to get the network time
+enum NtpError {
+    UdpBindFailed { error: embassy_net::udp::BindError },
+
+    /// The networkstack has no gateway
+    NoGateway,
+
+    /// Error while getting the timestamp from the NTP-Server
+    GetTimeError { error: sntpc::Error }
+}
+
+// region: sync_time_from_ntp
+/// Gets the network time form the getway server
+async fn sync_time_from_ntp(
+    stack: Stack<'static>,
+) -> Result<sntpc::NtpResult, NtpError> {
+    const UDP_BUF_SIZE: usize = 1024;
+    const UDP_PACKET_COUNT: usize = 4;
+
+    let mut rx_meta = [PacketMetadata::EMPTY; UDP_PACKET_COUNT];
+    let mut tx_meta = [PacketMetadata::EMPTY; UDP_PACKET_COUNT];
+
+    let mut rx_buf = [0u8; UDP_BUF_SIZE];
+    let mut tx_buf = [0u8; UDP_BUF_SIZE];
+
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut rx_buf,
+        &mut tx_meta,
+        &mut tx_buf,
+    );
+    match socket.bind(0) {
+        Ok(value) => value,
+        Err(error) => return Err(NtpError::UdpBindFailed { error })
+    };
+
+    let socket = UdpSocketWrapper::from(socket);
+
+    let context = NtpContext::new(
+        EmbassyTimestampGenerator::default(),
+    );
+
+    let gateway_address: Ipv4Addr = match stack.config_v4() {
+        None => return Err(NtpError::NoGateway),
+        Some(value) => match value.gateway {
+            None => return Err(NtpError::NoGateway),
+            Some(ip) => ip
+        }
+    };
+ 
+    let server: SocketAddr = SocketAddr::V4(SocketAddrV4::new(
+        gateway_address,
+        123,
+    ));
+
+    return get_time(server, &socket, context).await.map_err(|error| NtpError::GetTimeError { error });
+}
+// endregion

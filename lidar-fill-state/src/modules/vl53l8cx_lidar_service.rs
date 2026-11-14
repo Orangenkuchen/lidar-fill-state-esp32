@@ -2,8 +2,10 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::{Receive
 use esp_hal::{Blocking, i2c::master::I2c};
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
-use embassy_time::Instant;
+use fasttime::{Date, DateTime, OffsetDateTime, Time, UtcOffset};
 use log::error;
+
+use crate::modules::clock::{CLOCK};
 
 /// The errors that can happen while initilizing the lidar
 #[derive(Debug)]
@@ -73,7 +75,7 @@ pub struct LidarReading {
     pub silicon_temp_degc: i8,
 
     /// The timestamp when `last_distance_values` was last set
-    pub last_read_timestamp: Instant
+    pub last_read_timestamp: OffsetDateTime
 }
 
 /// Service for the lidar
@@ -186,7 +188,7 @@ impl VL53L8CxLidarService {
     }
 
     /// Check the lidar for new data. If new data are available the data will be available via getting_lidar_reading
-    pub fn check_for_new_data(&mut self) -> Result<bool, CheckForNewDataError> {
+    pub async fn check_for_new_data(&mut self) -> Result<bool, CheckForNewDataError> {
         let mut read_results: Vl53l8cxResultsData = unsafe { core::mem::zeroed() };
 
         let mut device_configuration = match self.device_configuration.take() {
@@ -245,11 +247,22 @@ impl VL53L8CxLidarService {
             };
         }
 
+        let current_timestame: OffsetDateTime = match CLOCK.unix_time().await {
+            Some(value) => value,
+            None => OffsetDateTime {
+                utc: DateTime {
+                    date: Date { year: 1970, month: 1, day: 1 },
+                    time: Time { hour: 0, minute: 0, second: 0, nanosecond: 0 }
+                },
+                offset: UtcOffset::from_seconds(0).unwrap()
+            }
+        };
+
         self.lidar_reading.sender().send(
             LidarReading {
                 zones: zones,
                 silicon_temp_degc: read_results.silicon_temp_degc,
-                last_read_timestamp: Instant::now(),
+                last_read_timestamp: current_timestame,
             }
         );
 

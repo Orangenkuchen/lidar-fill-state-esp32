@@ -519,7 +519,7 @@ dependencies = [
  "embedded-nal-async",
  "heapless 0.9.3",
  "managed",
- "smoltcp 0.13.1",
+ "smoltcp",
 ]
 
 [[package]]
@@ -1147,6 +1147,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fasttime"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e7255715eb3eb493129c4f45fb1582ea39bb13ad42013f026bd8502848cd4af"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1421,12 +1427,15 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
+ "fasttime",
  "gzip-bytes",
  "heapless 0.9.3",
  "littlefs-rust",
  "log",
  "nojson",
- "smoltcp 0.14.0",
+ "sntpc",
+ "sntpc-net-embassy",
+ "sntpc-time-embassy",
  "static_cell",
 ]
 
@@ -1882,16 +1891,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "smoltcp"
-version = "0.14.0"
+name = "sntpc"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+checksum = "294278b134cd7d06d7f22eca970aebe38707864c080f66547f9ad26327534af3"
 dependencies = [
- "bitflags 1.3.2",
- "byteorder",
  "cfg-if",
- "heapless 0.9.3",
- "managed",
+]
+
+[[package]]
+name = "sntpc-net-embassy"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97d4addcbed51e6aa5178ba85834d1748b70da0f3df4552382a10afbfe285ae3"
+dependencies = [
+ "embassy-net",
+ "sntpc",
+]
+
+[[package]]
+name = "sntpc-time-embassy"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "184c354de440d7b2e95a547eb16f2527a1eba1bb666f322782cdb4d4668fc66f"
+dependencies = [
+ "embassy-time",
+ "sntpc",
 ]
 
 [[package]]
