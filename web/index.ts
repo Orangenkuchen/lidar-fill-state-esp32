@@ -961,6 +961,11 @@ class MainHandler
         {
             try
             {
+                // Skip getting the new reading if the browser is not visiable
+                if (document.hidden) {
+                    return;
+                }
+
                 let reading = await this.FetchLidarReading();
 
                 if (reading == null)
