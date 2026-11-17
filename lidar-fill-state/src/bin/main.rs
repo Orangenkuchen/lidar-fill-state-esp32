@@ -5,7 +5,7 @@
 #![no_main]
 
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use edge_http::{
     io::{
         server::{
@@ -22,6 +22,7 @@ use esp_radio::wifi::DisconnectReason;
 use lidar_fill_state::modules::clock::CLOCK;
 use lidar_fill_state::modules::file_manager::FileManager;
 use lidar_fill_state::modules::http_handler::{HttpHandler, LidarJsonResponseBuffer};
+use lidar_fill_state::modules::led_state_manager::{Activity, LedStateManager, SystemState};
 use lidar_fill_state::modules::little_fs_storage::LittleFsStorage;
 use lidar_fill_state::modules::vl53l8cx_lidar_service::{
     CheckForNewDataError,
@@ -65,7 +66,6 @@ use esp_hal::{
 };
 use esp_hal::i2c::master::I2c;
 use esp_println as _;
-use heapless::Vec;
 use esp_radio::wifi::{
     AuthenticationMethodConfig,
     Config as WifiConfig,
@@ -84,6 +84,7 @@ use embassy_sync::{
     mutex::Mutex,
     watch::{Watch},
 };
+use esp_sync::RawMutex;
 
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4};
 
@@ -100,16 +101,7 @@ use edge_nal_embassy::{Udp, UdpBuffers};
 use sntpc::{get_time, NtpContext};
 use sntpc_net_embassy::UdpSocketWrapper;
 use sntpc_time_embassy::EmbassyTimestampGenerator;
-
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SystemState {
-    Starting = 0,
-    Running = 1,
-    WifiError = 2,
-    SensorError = 3,
-    Panic = 4
-}
+use embassy_futures::yield_now;
 
 /// The size of a storage block
 const STORAGE_BLOCK_SIZE: u32 = 4 * 1_024;
@@ -156,10 +148,6 @@ static MDNS_UDP_BUFFERS: StaticCell<UdpBuffers<1, 512, 512>> =
 
 /// If true the lidar will start the ranging measurment. If it switches to false the measument will stop
 static LIDAR_RUN_STATE: AtomicBool = AtomicBool::new(false);
-/// The state of the system
-/// 
-/// Primarily used for the RGB led on the esp32
-static SYSTEM_STATE: AtomicU8 = AtomicU8::new(SystemState::Starting as u8);
 /// STATIC NETWORK MEMORY
 ///
 /// embassy-net needs memory that lives for the entire lifetime
@@ -173,17 +161,16 @@ static TCP_BUFFERS: StaticCell<TcpBuffers<TCP_BUFFER_N, TCP_BUFFER_SEND_SIZE, TC
     StaticCell::new();
 static LIDAR_READING: StaticCell<LidarReadingWatch> = StaticCell::new();
 static LIDAR_JSON_RESPONSE: StaticCell<LidarJsonResponseBuffer> = StaticCell::new();
+/// The max amount of led activities
+static ACTIVITY_COUNT: usize = 10;
+static LED_STATE_MANAGER: Mutex<RawMutex, LedStateManager<ACTIVITY_COUNT>> =
+    Mutex::new(LedStateManager::new());
 
 // region: panic
 /// Will be called when the esp32 encounters a panic
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_println::println!("PANIC: {}", info);
-
-    SYSTEM_STATE.store(
-        SystemState::Panic as u8,
-        Ordering::Relaxed,
-    );
 
     loop {
         core::hint::spin_loop();
@@ -201,6 +188,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger(log::LevelFilter::Trace);
 
     info!("Programm starting...");
+    LED_STATE_MANAGER.lock().await.brightness = 0x05;
 
     trace!("Configuring the ESP and it's peripherls...");
     // Use the default configuration, but run the CPU at its maximum clock speed.
@@ -262,12 +250,14 @@ async fn main(spawner: Spawner) -> ! {
     debug!("Spawning a task for the RGB-LED...");
     // Start the LED-Task
     spawner.spawn(
-        led_task(channel)
+        led_task(channel, &LED_STATE_MANAGER)
             .expect("failed to create LED task")
     );
+    yield_now().await;
 
     trace!("Setting up the network and wifi components...");
     let network_components = setup_network(WIFI);
+    yield_now().await;
 
     // Reset the sensor's I2C interface and select I2C mode.
     let mut sensor_i2c_mode = Output::new(
@@ -309,6 +299,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(
         sensor_task(lidar_service).expect("failed to spawn sensor task")
     );
+    yield_now().await;
 
     // START NETWORK TASK
     //
@@ -320,15 +311,18 @@ async fn main(spawner: Spawner) -> ! {
         net_task(network_components.runner)
             .expect("failed to spawn network task")
     );
+    yield_now().await;
 
     debug!("Spawning a task for wifi managment...");
     spawner.spawn(
         wifi_task(network_components.wifi_controller)
             .expect("failed to spawn Wi-Fi task")
     );
+    yield_now().await;
 
     debug!("Waiting for ipv4 config from DHCP...");
     network_components.stack.wait_config_up().await;
+    LED_STATE_MANAGER.lock().await.set_system_state(lidar_fill_state::modules::led_state_manager::SystemState::IpReceived);
 
     if let Some(config) = network_components.stack.config_v4() {
         trace!("Received IPv4 config from DHCP: IP = {}", config.address);
@@ -340,6 +334,7 @@ async fn main(spawner: Spawner) -> ! {
             .expect("failed to spawn NTP task"),
     );
     trace!("NTP task spawned.");
+    yield_now().await;
 
     debug!("Spawning mDNS responder...");
     spawner.spawn(
@@ -347,6 +342,7 @@ async fn main(spawner: Spawner) -> ! {
             .expect("failed to spawn mDNS task"),
     );
     trace!("mDNS task spawned.");
+    yield_now().await;
 
     debug!("Spawning a task for the web-server...");
     let tcp_buffers =
@@ -373,6 +369,7 @@ async fn main(spawner: Spawner) -> ! {
             file_manager,
             reading_watch,
             json_response_buffer,
+            &LED_STATE_MANAGER
         )
         .expect("failed to spawn web server task")
     );
@@ -469,50 +466,29 @@ fn setup_network<'a>(wifi: WIFI<'static>) -> NetworkComponents<'a> {
 #[embassy_executor::task]
 async fn led_task(
     mut channel: Channel<'static, esp_hal::Async, Tx>,
+    led_state_manager: &'static Mutex<RawMutex, LedStateManager<ACTIVITY_COUNT>>
 ) {
+    let mut system_state: Option<SystemState> = None;
+    let mut dominiant_activity: Option<Activity> = None;
+
     loop {
-        let state = match SYSTEM_STATE.load(Ordering::Relaxed) {
-            0 => SystemState::Starting,
-            1 => SystemState::Running,
-            2 => SystemState::WifiError,
-            3 => SystemState::SensorError,
-            4 => SystemState::Panic,
-            _ => SystemState::Starting,
-        };
+        let active_state_and_color = led_state_manager.lock().await.get_active_state_and_color();
 
-        let led_sequence: Vec<LedFlash, 10> = match state {
-            SystemState::WifiError => {
-                [
-                    LedFlash { r: 0x05, g: 0x0, b: 0x05, duration: Duration::from_millis(500) },
-                    LedFlash { r: 0x05, g: 0x05, b: 0x0, duration: Duration::from_millis(500) }
-                ].into()
-            }
+        let data = ws2812_data(active_state_and_color.color.r, active_state_and_color.color.g, active_state_and_color.color.b);
 
-            SystemState::Running => {
-                [
-                    LedFlash { r: 0x0, g: 0x05, b: 0x00, duration: Duration::from_millis(500) },
-                    LedFlash { r: 0x02, g: 0x05, b: 0x02, duration: Duration::from_millis(500) }
-                ].into()
-            }
-            SystemState::Panic => {
-                [
-                    LedFlash { r: 0x05, g: 0x00, b: 0x00, duration: Duration::from_millis(1000) },
-                    LedFlash { r: 0x05, g: 0x02, b: 0x02, duration: Duration::from_millis(1000) }
-                ].into()
-            }
+        channel
+            .transmit(&data)
+            .await
+            .unwrap();
 
-            _ => {
-                [
-                    LedFlash { r: 0x05, g: 0x0, b: 0x00, duration: Duration::from_millis(1000) },
-                    LedFlash { r: 0x05, g: 0x02, b: 0x0, duration: Duration::from_millis(1000) }
-                ].into()
-            }
-        };
+        if system_state != Some(active_state_and_color.system_state) || dominiant_activity != active_state_and_color.dominant_activity {
+            trace!(
+                "LED-State has change. New: {} - {:?}", active_state_and_color.system_state, active_state_and_color.dominant_activity);
+            system_state = Some(active_state_and_color.system_state);
+            dominiant_activity = active_state_and_color.dominant_activity;
+        }
 
-        show_led_sequence(
-            &mut channel, 
-            led_sequence
-        ).await;
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
 // endregion
@@ -563,10 +539,8 @@ async fn wifi_task(
                     connect_info.ssid.as_str(),
                     authmodestr
                 );
-                SYSTEM_STATE.store(
-                    SystemState::Running as u8,
-                    Ordering::Relaxed,
-                );
+                
+                LED_STATE_MANAGER.lock().await.set_system_state(lidar_fill_state::modules::led_state_manager::SystemState::WifiConnected);
             }
 
             Err(connection_error) => {
@@ -593,10 +567,7 @@ async fn wifi_task(
                     _ => "Unknown"
                 };
                 warn!("Error while conneting to the wifi: {}", reason);
-                SYSTEM_STATE.store(
-                    SystemState::WifiError as u8,
-                    Ordering::Relaxed,
-                );
+                LED_STATE_MANAGER.lock().await.set_system_state(lidar_fill_state::modules::led_state_manager::SystemState::WifiLost);
 
                 let wait_duration = Duration::from_secs(5);
                 trace!("Waiting {} before retry...", wait_duration);
@@ -611,6 +582,7 @@ async fn wifi_task(
             controller
                 .wait_for_disconnect_async()
                 .await;
+        LED_STATE_MANAGER.lock().await.set_system_state(lidar_fill_state::modules::led_state_manager::SystemState::WifiLost);
 
         let retry_timeout_duration = Duration::from_secs(2);
         trace!("Waiting {} before trying to reconnect to wifi...", retry_timeout_duration);
@@ -648,6 +620,7 @@ async fn web_server_task(
     >,
     reading_watch: &'static LidarReadingWatch,
     json_response_buffer: &'static LidarJsonResponseBuffer,
+    led_state_manager: &'static Mutex<RawMutex, LedStateManager<ACTIVITY_COUNT>>
 ) -> ! {
     info!("HTTP server starting on port 80...");
 
@@ -674,7 +647,8 @@ async fn web_server_task(
                     filesystem,
                     file_manager,
                     reading_watch, 
-                    json_response_buffer
+                    json_response_buffer,
+                    led_state_manager
                 },
             )
             .await
@@ -726,7 +700,6 @@ fn ws2812_data(
         r,
         b,
     ];
-
 
     // Allocate space for:
     //
@@ -828,34 +801,6 @@ fn ws2812_data(
 
 
     data
-}
-// endregion
-
-// region: show_led_sequence
-/// Sendet an die LED die übergebene Farb-Sequenz
-async fn show_led_sequence(
-    channel: &mut Channel<'static, esp_hal::Async, Tx>,
-    led_flashes: Vec<LedFlash, 10>)
-{
-    for led_flash in led_flashes {
-        let data = ws2812_data(led_flash.r, led_flash.g, led_flash.b);
-
-        channel
-            .transmit(&data)
-            .await
-            .unwrap();
-
-        Timer::after(led_flash.duration).await;
-    }
-}
-// endregion
-
-// region: struct LedFlash
-struct LedFlash {
-    r: u8,
-    g: u8,
-    b: u8,
-    duration: Duration
 }
 // endregion
 

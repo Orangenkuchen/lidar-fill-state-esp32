@@ -9,6 +9,7 @@ use edge_http::{
     },
     Method,
 };
+use esp_sync::RawMutex;
 use heapless::CapacityError;
 use log::{debug, error, info, trace, warn};
 use embedded_io_async::{Read, Write};
@@ -17,7 +18,7 @@ use littlefs_rust::{
     Error, Filesystem, OpenFlags
 };
 use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::{Mutex, MutexGuard},
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::{Mutex, MutexGuard}
 };
 use embassy_time::{Duration, with_timeout};
 use gzip_bytes::gzip_bytes;
@@ -77,13 +78,13 @@ const HTTP_CONNECTION_BUFFER_SIZE: usize = 1024;
 const HTTP_JSON_REQUEST_MAX_SIZE: usize = 1024;
 
 use crate::modules::{
-    file_manager::FileManager, html_form::Form, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,
+    file_manager::FileManager, html_form::Form, led_state_manager::LedStateManager, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,
 };
 
 pub type LidarJsonResponseBuffer =
     Mutex<CriticalSectionRawMutex, heapless::String<16_384>>;
 
-pub struct HttpHandler {
+pub struct HttpHandler<const ACTIVITY_COUNT: usize> {
     pub filesystem: &'static Mutex<
         NoopRawMutex,
         Filesystem<LittleFsStorage<'static>>,
@@ -94,9 +95,11 @@ pub struct HttpHandler {
     >,
     pub reading_watch: &'static LidarReadingWatch,
     pub json_response_buffer: &'static LidarJsonResponseBuffer,
+    pub led_state_manager: &'static Mutex<RawMutex, LedStateManager<ACTIVITY_COUNT>>
 }
 
-impl HttpHandler {
+impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
+    // region: handle_post_settings
     /// Saves the Settings in the file system
     /// 
     /// ## Return codes
@@ -121,7 +124,10 @@ impl HttpHandler {
         match conn.initiate_response(
             303,
             Some("See Other"),
-            &[("Location", "/success")],
+            &[
+                ("Location", "/success"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -133,7 +139,9 @@ impl HttpHandler {
 
         return Ok(())
     }
+    // endregion
 
+    // region: handle_get_model3d
     /// Get the active 3D-Model file.
     /// 
     /// ## Return codes
@@ -196,7 +204,9 @@ impl HttpHandler {
                     match conn.initiate_response(
                         304,
                         Some("Not Modified"),
-                        &[],
+                        &[
+                            ("Access-Control-Allow-Origin", "*")
+                        ],
                     ).await {
                         Ok(()) => {},
                         Err(error) => {
@@ -226,7 +236,8 @@ impl HttpHandler {
                 ("Content-Type", "model/gltf-binary"),
                 ("Content-Length", content_length.as_str()),
                 ("Content-Disposition", content_disposition.as_str()),
-                ("ETag", etag.as_str())
+                ("ETag", etag.as_str()),
+                ("Access-Control-Allow-Origin", "*")
             ],
         ).await {
             Ok(()) => {},
@@ -257,7 +268,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_put_model3d
     /// Sets the active 3D-Model file
     /// 
     /// ## Parameters
@@ -300,7 +313,9 @@ impl HttpHandler {
         match conn.initiate_response(
             204,
             Some("No Content"),
-            &[],
+            &[
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -312,7 +327,9 @@ impl HttpHandler {
 
         return Ok(())
     }
+    // endregion
 
+    // region: handle_api_get_settings
     /// Get the settings
     /// 
     /// ## Return codes
@@ -340,7 +357,8 @@ impl HttpHandler {
             Some("OK"),
             &[
                 ("Content-Type", "application/json"),
-                ("Content-Disposition", content_disposition.as_str())
+                ("Content-Disposition", content_disposition.as_str()),
+                ("Access-Control-Allow-Origin", "*")
             ],
         ).await {
             Ok(()) => {},
@@ -372,7 +390,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_put_settings
     /// Saves the settings in the fs
     /// 
     /// ## Return codes
@@ -398,7 +418,9 @@ impl HttpHandler {
         match conn.initiate_response(
             204,
             Some("No Content"),
-            &[],
+            &[
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -410,7 +432,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_get_api_data_full
     /// Returns the latest LIDAR data as JSON
     /// 
     /// ## Returns codes
@@ -434,7 +458,7 @@ impl HttpHandler {
             f.object(|f| {
                 f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
                 f.member(
-                    "last_read_timestamp_ms",
+                    "last_read_timestamp",
                     lidar_reading.last_read_timestamp.to_string(),
                 )?;
                 f.member("zones", nojson::json(|f| {
@@ -464,7 +488,10 @@ impl HttpHandler {
         match conn.initiate_response(
             200,
             Some("OK"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -489,8 +516,10 @@ impl HttpHandler {
 
         return Ok(())
     }
+    // endregion
 
-    /// Returns the latest LIDAR data as JSON
+    // region: handle_get_api_data
+    /// Get the latest compact LIDAR reading
     /// 
     /// ## Returns codes
     /// - 200: The reading was successfully received
@@ -538,7 +567,10 @@ impl HttpHandler {
         match conn.initiate_response(
             200,
             Some("OK"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -563,7 +595,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_get_fillstate
     ///⚠️ Returns the latest LIDAR data as JSON
     /// 
     /// ## Returns codes
@@ -614,7 +648,10 @@ impl HttpHandler {
         match conn.initiate_response(
             200,
             Some("OK"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -639,7 +676,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_get_api_storage_info
     /// Get the stats of the storage of the esp32
     /// 
     /// ## Return codes
@@ -681,7 +720,10 @@ impl HttpHandler {
         match conn.initiate_response(
             200,
             Some("OK"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -707,7 +749,75 @@ impl HttpHandler {
 
         return Ok(())
     }
+    // endregion
 
+    // region: handle_put_led_brightness
+    /// Sets the brightness of the led
+    /// 
+    /// ## Querry-Parameters
+    /// - brightness: The new brightness of the led
+    /// 
+    /// ## Return codes
+    /// - 204: Brightness was set
+    async fn handle_put_led_brightness<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        info!("handle_put_led_brightness > Was called...");
+
+        let headers = conn.headers()?;
+        let path = headers.path;
+
+        let (_route, query) = path.split_once('?').unwrap_or((path, ""));
+
+        let brightness = match get_query_param(query, "brightness") {
+            None => {
+                warn!("handle_put_led_brightness > Query-Parameter \"brightness\" is missing. Returning 400...");
+                return self.setup_400_code_wrong_content_type(
+                    conn,
+                    "",
+                    Some("")
+                ).await;
+            },
+            Some(value) => match value.parse::<u8>() {
+                Err(error) => {
+                    warn!("handle_put_led_brightness > Query-Parameter \"brightness\" couldn't be parsed to u8 ({}). Returning 400...", error);
+                    return self.setup_400_code_wrong_content_type(
+                        conn,
+                        "",
+                        Some("")
+                    ).await;
+                },
+                Ok(value) => value
+            }
+        };
+
+        self.led_state_manager.lock().await.brightness = brightness;
+
+        debug!("handle_put_led_brightness > Initialising the response...");
+        match conn.initiate_response(
+            204,
+            Some("No Content"),
+            &[
+                ("Access-Control-Allow-Origin", "*")
+            ],
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("handle_put_led_brightness > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("handle_put_led_brightness > Response was initialized. Request completed.");
+
+        return Ok(())
+    }
+    // endregion
+
+    // region: save_settings_from_connection
     /// Saves the settings json from the connection in the fs
     async fn save_settings_from_connection<T, const N: usize>(
         &self,
@@ -837,7 +947,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_not_found
     /// Returns the error-page, when an unknown path was requested
     /// 
     /// ## Returns codes
@@ -855,7 +967,10 @@ impl HttpHandler {
         match conn.initiate_response(
             404,
             Some("Not Found"),
-            &[("Content-Type", "text/plain")],
+            &[
+                ("Content-Type", "text/plain"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -877,7 +992,9 @@ impl HttpHandler {
 
         return Ok(())
     }
+    // endregion
 
+    // region: serve_static_content
     /// Serves the static content
     /// 
     /// ## Return codes
@@ -922,7 +1039,9 @@ impl HttpHandler {
                     match conn.initiate_response(
                         304,
                         Some("Not Modified"),
-                        &[],
+                        &[
+                            ("Access-Control-Allow-Origin", "*")
+                        ],
                     ).await {
                         Ok(()) => {},
                         Err(error) => {
@@ -946,7 +1065,8 @@ impl HttpHandler {
                 ("Content-Type", mime_type),
                 ("Content-Length", content_length.as_str()),
                 ("Content-Encoding", "gzip"),
-                ("ETag", etag.as_str())
+                ("ETag", etag.as_str()),
+                ("Access-Control-Allow-Origin", "*")
             ],
         ).await {
             Ok(()) => {},
@@ -969,7 +1089,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: handle_save_settings_error
     /// Logs and returns the appropriete Error to the web client
     /// 
     /// ## Parameters
@@ -1047,7 +1169,9 @@ impl HttpHandler {
             }
         }
     }
+    // endregion
 
+    // region: setup_500_code_on_connection
     /// Sets the http code 500 on the connection
     /// 
     /// ## Parameters
@@ -1067,7 +1191,10 @@ impl HttpHandler {
         match conn.initiate_response(
             500,
             Some("Internal Server Error"),
-            &[("Content-Type", "text/plain")],
+            &[
+                ("Content-Type", "text/plain"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -1095,7 +1222,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: setup_400_code_wrong_content_type
     /// Setts the http code 400 on the connection and a description
     /// for the wrong content-type
     /// 
@@ -1118,7 +1247,10 @@ impl HttpHandler {
         match conn.initiate_response(
             400,
             Some("Bad Request"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -1148,7 +1280,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: setup_400_code_body_too_long
     /// Setts the http code 400 on the connection and a description
     /// for the body that is too long
     /// 
@@ -1169,7 +1303,10 @@ impl HttpHandler {
         match conn.initiate_response(
             400,
             Some("Bad Request"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -1198,7 +1335,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: setup_400_code_json_inavalid
     /// Setts the http code 400 on the connection and a description
     /// for the body that the json was wrong
     /// 
@@ -1217,7 +1356,10 @@ impl HttpHandler {
         match conn.initiate_response(
             400,
             Some("Bad Request"),
-            &[("Content-Type", "application/json")],
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -1245,7 +1387,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: setup_474_element_not_found
     /// Setts the http code 474 on the connection
     /// 
     /// ## Parameters 
@@ -1263,7 +1407,9 @@ impl HttpHandler {
         match conn.initiate_response(
             474,
             Some("Element Not Found"),
-            &[],
+            &[
+                ("Access-Control-Allow-Origin", "*")
+            ],
         ).await {
             Ok(()) => {},
             Err(error) => {
@@ -1275,7 +1421,9 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 
+    // region: setup_500_request_timeout
     /// Setts the http code 500 on the connection and log that
     /// a timeout happend
     /// 
@@ -1299,6 +1447,7 @@ impl HttpHandler {
             &[
                 ("Content-Type", "text/plain; charset=utf-8"),
                 ("Content-Length", "18"),
+                ("Access-Control-Allow-Origin", "*")
             ],
         ).await?;
         conn.write_all(b"Request timed out\n").await?;
@@ -1306,14 +1455,16 @@ impl HttpHandler {
 
         return Ok(());
     }
+    // endregion
 }
 
-impl Handler for HttpHandler {
+impl<const ACTIVITY_COUNT: usize> Handler for HttpHandler<ACTIVITY_COUNT> {
     type Error<E>
         = edge_http::io::Error<E>
     where
         E: Debug;
 
+    // region: handle
     async fn handle<T, const N: usize>(
         &self,
         _task_id: impl Display + Copy,
@@ -1327,9 +1478,12 @@ impl Handler for HttpHandler {
             let headers = conn.headers()?;
 
             let method = headers.method;
-            let mut path: heapless::String<128> = heapless::String::new();
+            let path_without_query = headers.path
+                .split_once('?')
+                .map_or(headers.path, |(path, _)| path);
 
-            path.push_str(headers.path).unwrap();
+            let mut path: heapless::String<128> = heapless::String::new();
+            path.push_str(path_without_query).unwrap();
 
             (method, path)
         };
@@ -1370,12 +1524,13 @@ impl Handler for HttpHandler {
                     (Method::Put, "/api/settings") => self.handle_put_settings(conn).await,
                     (Method::Get, "/api/model3d") => self.handle_get_model3d(conn).await,
                     (Method::Put, "/api/model3d") => self.handle_put_model3d(conn).await,
+                    (Method::Put, "/api/led-brightness") => self.handle_put_led_brightness(conn).await,
                     (Method::Get, "/swagger") => self.serve_static_content(
                         conn,
                         "text/html; charset=utf-8",
                         HTTP_SWAGGER_HTML
                     ).await,
-                    (Method::Get, "/swagger/openapi.json") => self.serve_static_content(
+                    (Method::Get, "/openapi.json") => self.serve_static_content(
                         conn,
                         "application/json; charset=utf-8",
                         HTTP_OPENAPI_JSON
@@ -1407,7 +1562,6 @@ impl Handler for HttpHandler {
                     ).await,
                     (Method::Get, "/api/datafull") => self.handle_get_api_data_full(conn).await,
                     (Method::Get, "/api/data") => self.handle_get_api_data(conn).await,
-                    (Method::Get, "/api/storage") => self.handle_get_api_storage_info(conn).await,
                     (Method::Get, "/api/file-system-stats") => self.handle_get_api_storage_info(conn).await,
                     _ => self.handle_not_found(conn).await,
                 }
@@ -1423,11 +1577,19 @@ impl Handler for HttpHandler {
             _ => "other"
         };
 
-        match future.await {
+        let result = match future.await {
             Ok(value) => value,
             Err(_error) => self.setup_500_request_timeout(conn, method_string, &path).await
+        };
+
+        match self.led_state_manager.lock().await.add_activity(crate::modules::led_state_manager::Activity::WebRequest, Some(200)) {
+            Ok(()) => (),
+            Err(_error) => warn!("Error while adding activity to the led_state")
         }
+
+        return result;
     }
+    // endregion
 }
 
 /// Get the stats for the file system
@@ -1525,6 +1687,18 @@ fn parse_settings_from_www_form(
         lidar_camera_name: lidar_camera_name.unwrap_or_default(),
         wifi_ssid: wifi_ssid.unwrap_or_default(),
         wifi_password: wifi_password.unwrap_or_default(),
+    })
+}
+
+fn get_query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+
+        if key == name {
+            Some(value)
+        } else {
+            None
+        }
     })
 }
 

@@ -66,9 +66,9 @@ critical-section = "1.2.0"
 static_cell = "2.1.1"
 heapless = "0.9.3"
 nojson = { version = "0.3.15", default-features = false }
-
 embassy-sync = "0.8"
-
+embassy-futures = "0.1"
+esp-sync = "0.3"
 gzip-bytes = { path = "./gzip-bytes" }
 
 sntpc = { version = "0.11", default-features = false }
@@ -76,6 +76,7 @@ sntpc-net-embassy = { version = "0.11", default-features = false, features = ["i
 sntpc-time-embassy = "0.6"
 
 fasttime = { version = "0.3", default-features = false }
+libm = "0.2"
 
 [profile.dev]
 opt-level = "s"

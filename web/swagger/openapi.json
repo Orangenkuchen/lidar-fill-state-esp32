@@ -7,13 +7,13 @@
     },
     "servers": [
         {
-            "url": "http://192.168.178.36/",
+            "url": "http://lidar-fill-state",
             "description": "Same host as the ESP32 web interface"
         }
     ],
     "tags": [
         {
-            "name": "LIDAR",
+            "name": "Data",
             "description": "Sensor readings"
         },
         {
@@ -27,19 +27,23 @@
         {
             "name": "3D model",
             "description": "Active GLB model file"
+        },
+        {
+            "name": "Led",
+            "description": "Endpoints of the LED of the esp32"
         }
     ],
     "paths": {
         "/api/data": {
             "get": {
                 "tags": [
-                    "LIDAR"
+                    "Data"
                 ],
-                "summary": "Get the latest compact LIDAR reading",
+                "summary": "Gets the latest compact LIDAR reading",
                 "operationId": "getLidarData",
                 "responses": {
                     "200": {
-                        "description": "Latest temperature, timestamp, and 64 measured distances",
+                        "description": "The latest measurements",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -47,9 +51,6 @@
                                 }
                             }
                         }
-                    },
-                    "404": {
-                        "$ref": "#/components/responses/NotFound"
                     }
                 }
             }
@@ -57,13 +58,13 @@
         "/api/datafull": {
             "get": {
                 "tags": [
-                    "LIDAR"
+                    "Data"
                 ],
-                "summary": "Get the latest full LIDAR reading",
+                "summary": "Gets the latest full LIDAR reading",
                 "operationId": "getLidarDataFull",
                 "responses": {
                     "200": {
-                        "description": "Latest reading with all 64 zone measurements",
+                        "description": "The latest measurements",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -71,33 +72,6 @@
                                 }
                             }
                         }
-                    },
-                    "404": {
-                        "$ref": "#/components/responses/NotFound"
-                    }
-                }
-            }
-        },
-        "/api/storage": {
-            "get": {
-                "tags": [
-                    "Storage"
-                ],
-                "summary": "Get filesystem capacity and usage",
-                "operationId": "getStorageInfo",
-                "responses": {
-                    "200": {
-                        "description": "Filesystem statistics in bytes",
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/FileSystemStat"
-                                }
-                            }
-                        }
-                    },
-                    "500": {
-                        "$ref": "#/components/responses/InternalServerError"
                     }
                 }
             }
@@ -107,11 +81,11 @@
                 "tags": [
                     "Storage"
                 ],
-                "summary": "Alias for storage statistics",
-                "operationId": "getFileSystemStats",
+                "summary": "Get the stats of the storage of the esp32",
+                "operationId": "getStorageInfo",
                 "responses": {
                     "200": {
-                        "description": "Filesystem statistics in bytes",
+                        "description": "The stats of the file system",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -119,9 +93,6 @@
                                 }
                             }
                         }
-                    },
-                    "500": {
-                        "$ref": "#/components/responses/InternalServerError"
                     }
                 }
             }
@@ -131,17 +102,15 @@
                 "tags": [
                     "Settings"
                 ],
-                "summary": "Download the current settings resource",
-                "description": "The current handler implementation returns the active GLB model from this route, rather than a Settings object.",
+                "summary": "Get the current settings",
                 "operationId": "getSettings",
                 "responses": {
                     "200": {
-                        "description": "Currently returns the active GLB model due to the handler implementation",
+                        "description": "Return the current settings",
                         "content": {
-                            "model/gltf-binary": {
+                            "application/json": {
                                 "schema": {
-                                    "type": "string",
-                                    "format": "binary"
+                                    "$ref": "#/components/schemas/Settings"
                                 }
                             }
                         }
@@ -155,7 +124,7 @@
                 "tags": [
                     "Settings"
                 ],
-                "summary": "Store device settings",
+                "summary": "Save the device settings",
                 "description": "The handler parses a Settings object. Its Content-Type check currently rejects application/json, so the implementation does not currently accept the documented JSON media type.",
                 "operationId": "putSettings",
                 "requestBody": {
@@ -169,8 +138,8 @@
                     }
                 },
                 "responses": {
-                    "200": {
-                        "description": "Settings stored"
+                    "204": {
+                        "description": "The settings were successfully saved."
                     },
                     "400": {
                         "$ref": "#/components/responses/BadRequest"
@@ -181,16 +150,16 @@
                 }
             }
         },
-        "/model3d": {
+        "/api/model3d": {
             "get": {
                 "tags": [
                     "3D model"
                 ],
-                "summary": "Download the active 3D model",
+                "summary": "Get the active 3D-Model file.",
                 "operationId": "getModel3d",
                 "responses": {
                     "200": {
-                        "description": "GLB model file",
+                        "description": "The GLB model file",
                         "content": {
                             "model/gltf-binary": {
                                 "schema": {
@@ -208,8 +177,13 @@
                             }
                         }
                     },
-                    "500": {
-                        "$ref": "#/components/responses/InternalServerError"
+                    "474": {
+                        "description": "The GLB model wasn't found in the file system.",
+                        "content": {
+                            "text/plain": {
+                                "schema": {}
+                            }
+                        }
                     }
                 }
             },
@@ -217,7 +191,7 @@
                 "tags": [
                     "3D model"
                 ],
-                "summary": "Replace the active 3D model",
+                "summary": "Saves the 3D model",
                 "operationId": "putModel3d",
                 "requestBody": {
                     "required": true,
@@ -227,18 +201,12 @@
                                 "type": "string",
                                 "format": "binary"
                             }
-                        },
-                        "application/octet-stream": {
-                            "schema": {
-                                "type": "string",
-                                "format": "binary"
-                            }
                         }
                     }
                 },
                 "responses": {
                     "204": {
-                        "description": "Model saved"
+                        "description": "Model successfully saved."
                     },
                     "500": {
                         "$ref": "#/components/responses/InternalServerError"
@@ -258,23 +226,58 @@
                     "content": {
                         "application/octet-stream": {
                             "schema": {
-                                "type": "string",
-                                "format": "binary"
+                                "$ref": "#/components/schemas/Settings"
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/Settings"
                             }
                         }
                     }
                 },
                 "responses": {
-                    "200": {
-                        "description": "Upload handler response",
-                        "content": {
-                            "text/plain": {
+                    "303": {
+                        "description": "Settings saved. Redirecting to the get method.",
+                        "headers": {
+                            "Location": {
+                                "description": "URL to redirect the client to the get method",
                                 "schema": {
                                     "type": "string",
-                                    "example": "Upload successful\n"
+                                    "format": "uri"
                                 }
                             }
                         }
+                    },
+                    "400": {
+                        "description": "The parameters were wrong"
+                    }
+                }
+            }
+        },
+        "/api/led-brightness": {
+            "put": {
+                "tags": [
+                    "Led"
+                ],
+                "summary": "Sets the brightness of the led",
+                "operationId": "putLedBrightness",
+                "parameters": [
+                    {
+                        "name": "brightness",
+                        "in": "query",
+                        "required": true,
+                        "description": "LED brightness (0-255)",
+                        "schema": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Brightness was set."
                     }
                 }
             }
@@ -315,20 +318,19 @@
                 "type": "object",
                 "required": [
                     "silicon_temp_degc",
-                    "last_read_timestamp_ms",
+                    "last_read_timestamp",
                     "distance_mm"
                 ],
                 "properties": {
                     "silicon_temp_degc": {
                         "type": "integer",
                         "format": "int32",
-                        "description": "Sensor silicon temperature in degrees Celsius"
+                        "description": "Sensor silicon temperature in °C"
                     },
-                    "last_read_timestamp_ms": {
-                        "type": "integer",
-                        "format": "int64",
-                        "minimum": 0,
-                        "description": "Elapsed time at the last reading, in milliseconds"
+                    "last_read_timestamp": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "The Timestamp of the reading"
                     },
                     "distance_mm": {
                         "type": "array",
@@ -337,7 +339,7 @@
                         "maxItems": 64,
                         "items": {
                             "type": "integer",
-                            "format": "int32"
+                            "format": "uint16"
                         }
                     }
                 }
@@ -346,7 +348,7 @@
                 "type": "object",
                 "required": [
                     "silicon_temp_degc",
-                    "last_read_timestamp_ms",
+                    "last_read_timestamp",
                     "zones"
                 ],
                 "properties": {
@@ -355,11 +357,10 @@
                         "format": "int32",
                         "description": "Sensor silicon temperature in degrees Celsius"
                     },
-                    "last_read_timestamp_ms": {
-                        "type": "integer",
-                        "format": "int64",
-                        "minimum": 0,
-                        "description": "Elapsed time at the last reading, in milliseconds"
+                    "last_read_timestamp": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "The Timestamp of the reading"
                     },
                     "zones": {
                         "type": "array",
@@ -386,7 +387,7 @@
                 "properties": {
                     "ambient_per_spad": {
                         "type": "integer",
-                        "format": "int64",
+                        "format": "int32",
                         "minimum": 0,
                         "description": "Ambient noise in kcps/spad"
                     },
