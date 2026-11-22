@@ -7,13 +7,12 @@ use littlefs_rust::{
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::Mutex,
 };
-use static_cell::StaticCell;
 use crate::modules::{
     little_fs_storage::LittleFsStorage,
 };
 
 /// The Path of the 3D-Model in the filesystem
-const GLB_FILE_PATH: &str = "Model.glb";
+pub const GLB_FILE_PATH: &str = "Model.glb";
 /// The Path of the Settings-File in the filesystem
 const SETTINGS_JSON_FILE_PATH: &str = "Settings.json";
 
@@ -35,6 +34,7 @@ pub struct FileManager {
 }
 
 impl FileManager {
+    // region: save_3dmodel
     /// Saves the bytes from the reader as the file for the 3d-model
     /// 
     /// ## Parameters
@@ -54,7 +54,9 @@ impl FileManager {
 
         return result;
     }
+    // endregion
 
+    // region:load_3dmodel
     /// Loads the bytes of the file for the 3d-model
     /// 
     /// ## Paramters
@@ -77,7 +79,9 @@ impl FileManager {
 
         return result;
     }
+    // endregion
 
+    // region: load_settings
     /// Loads the bytes of the file for the settings
     /// 
     /// ## Paramters
@@ -100,7 +104,9 @@ impl FileManager {
 
         return result;
     }
+    // endregion
 
+    // region: get_3dmodel_size
     /// Loads the size of the 3d-model file in bytes
     /// 
     /// ## Parameters
@@ -117,7 +123,9 @@ impl FileManager {
 
         return result;
     }
+    // endregion
     
+    // region: load_metadata_from_3dmodel
     // pub async fn load_metadata_from_3dmodel<const BLOCK_SIZE: usize>(
     //     &self, 
     // ) -> Result<u32, littlefs_rust::Error>
@@ -159,7 +167,9 @@ impl FileManager {
 
     //     return Ok(1);
     // }
+    // endregion
 
+    // region: save_file
     /// Saves the bytes from the reader in the fs
     /// 
     /// ## Paramters
@@ -219,7 +229,9 @@ impl FileManager {
 
         return Ok(());
     }
+    // endregion
 
+    // region: load_file
     /// Loads the file and writes the bytes to the writer
     /// 
     /// ## Parameters
@@ -268,7 +280,9 @@ impl FileManager {
 
         return Ok(());
     }
+    // endregion
 
+    // region: get_file_size
     /// Loads the size of the file in bytes
     /// 
     /// ## Parameters
@@ -290,4 +304,5 @@ impl FileManager {
 
         return Ok(file.size());
     }
+    // endregion
 }

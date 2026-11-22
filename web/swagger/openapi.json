@@ -7,7 +7,7 @@
     },
     "servers": [
         {
-            "url": "http://lidar-fill-state",
+            "url": "http://lidar-fill-state.local",
             "description": "Same host as the ESP32 web interface"
         }
     ],
@@ -70,6 +70,35 @@
                                 "schema": {
                                     "$ref": "#/components/schemas/LidarDataFull"
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/fill-state": {
+            "get": {
+                "tags": [
+                    "Data"
+                ],
+                "summary": "Gets the fill-state of the container",
+                "operationId": "getLidarFillState",
+                "responses": {
+                    "200": {
+                        "description": "The fill-state was successfully calculated.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LidarDataFull"
+                                }
+                            }
+                        }
+                    },
+                    "424": {
+                        "description": "Something wasn't setup correctly yet.",
+                        "content": {
+                            "application/json": {
+                                
                             }
                         }
                     }

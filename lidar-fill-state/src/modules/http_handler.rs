@@ -1,5 +1,5 @@
 use core::fmt::{Debug, Display, Write as FmtWrite};
-use alloc::string::{String, ToString};
+use alloc::{string::{String, ToString}, vec};
 use edge_http::{
     io::{
         server::{
@@ -15,17 +15,29 @@ use log::{debug, error, info, trace, warn};
 use embedded_io_async::{Read, Write};
 use esp_println as _;
 use littlefs_rust::{
-    Error, Filesystem, OpenFlags
+    Error, Filesystem, OpenFlags, Storage
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex}, mutex::{Mutex, MutexGuard}
 };
 use embassy_time::{Duration, with_timeout};
 use gzip_bytes::gzip_bytes;
+use nojson::{RawJson, RawJsonValue};
+
+use crate::modules::{
+    file_manager::FileManager, glb_reader::{GlbParseError, GlbReader, get_scalar_u16_from_reader, get_vec3_f32_from_reader, parse_file_data}, html_form::Form, led_state_manager::LedStateManager, little_fs_storage::LittleFsStorage, mesh::create_lidar_mesh, vl53l8cx_lidar_service::LidarReadingWatch
+};
 
 pub enum WriteFileFromRequestError<E> {
     Fs(Error),
     Http(edge_http::io::Error<E>),
+}
+
+#[derive(Debug)]
+pub enum SettingsError {
+    IoError { error: Error },
+    JsonParseError { error: JsonParseError },
+    InvalidJsonError
 }
 
 impl<E> From<Error> for WriteFileFromRequestError<E> {
@@ -38,6 +50,14 @@ impl<E> From<edge_http::io::Error<E>> for WriteFileFromRequestError<E> {
     fn from(error: edge_http::io::Error<E>) -> Self {
         Self::Http(error)
     }
+}
+
+enum CalculateMeshDataError {
+    IoError { error: littlefs_rust::Error },
+    GlbParseError { error: GlbParseError },
+    ReaderMutexFull,
+    ContainerMissingIndecies,
+    ContainerMissingNormals
 }
 
 /// The html of the index page of the webserver
@@ -77,10 +97,6 @@ const HTTP_CONNECTION_BUFFER_SIZE: usize = 1024;
 /// The maximum size of a json response
 const HTTP_JSON_REQUEST_MAX_SIZE: usize = 1024;
 
-use crate::modules::{
-    file_manager::FileManager, html_form::Form, led_state_manager::LedStateManager, little_fs_storage::LittleFsStorage, vl53l8cx_lidar_service::LidarReadingWatch,
-};
-
 pub type LidarJsonResponseBuffer =
     Mutex<CriticalSectionRawMutex, heapless::String<16_384>>;
 
@@ -96,6 +112,26 @@ pub struct HttpHandler<const ACTIVITY_COUNT: usize> {
     pub reading_watch: &'static LidarReadingWatch,
     pub json_response_buffer: &'static LidarJsonResponseBuffer,
     pub led_state_manager: &'static Mutex<RawMutex, LedStateManager<ACTIVITY_COUNT>>
+}
+
+struct StdFileReader<'a, S: Storage> {
+    file: littlefs_rust::File<'a, S>,
+}
+
+impl<'a, S: Storage> GlbReader for StdFileReader<'a, S> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<u32, ()> {
+        self.file
+            .read(buffer)
+            .map(|n| n as u32)
+            .map_err(|_| ())
+    }
+
+    fn seek(&mut self, position: u32) -> Result<(), ()> {
+        self.file
+            .seek(littlefs_rust::SeekFrom::Start(position as u32))
+            .map(|_| ())
+            .map_err(|_| ())
+    }
 }
 
 impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
@@ -201,14 +237,14 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
                 if value.as_str() == etag.as_str()
                 {
                     debug!("handle_get_model3d > \"If-None-Match\"-Header matched. Returing 304 Not Modified...");
-                    match conn.initiate_response(
+                    return match conn.initiate_response(
                         304,
                         Some("Not Modified"),
                         &[
                             ("Access-Control-Allow-Origin", "*")
                         ],
                     ).await {
-                        Ok(()) => {},
+                        Ok(()) => Ok(()),
                         Err(error) => {
                             error!("handle_get_model3d > Error while initializing the response: {}", error);
                             return Err(error);
@@ -611,38 +647,110 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
     {
         info!("handle_get_fillstate > Was called...");
 
-        debug!("handle_get_fillstate > Getting the latest lidar reading...");
-        let mut receiver = self.reading_watch.receiver().unwrap();
-        let lidar_reading = receiver.get().await;
-        trace!("handle_get_fillstate > Lidar reading was received.");
+        let settings = match self.load_settings_from_flash().await {
+            Ok(value) => value,
+            Err(error) => match error {
+                SettingsError::IoError { error } => {
+                    match error {
+                        Error::NoEntry => return self.setup_424_code_failed_dependency(
+                            conn, 
+                            "{\"settings-file.exists\":\"The settings-file wasn't found. Is it not setup yet?\"}"
+                        ).await,
+                        _ => {                            
+                            error!("handle_get_fillstate > Error while loading the settings: IoError {}", error);
+                            return self.setup_500_general(conn).await;
+                        }
+                    }
+                },
+                SettingsError::InvalidJsonError => {
+                    error!("handle_get_fillstate > Error while loading the settings: InvalidJsonError");
+                    return self.setup_500_general(conn).await;
+                },
+                SettingsError::JsonParseError { error } => {
+                    error!("handle_get_fillstate > Error while loading the settings: JsonParseError {}", error);
+                    return self.setup_500_general(conn).await;
+                }
+            }
+        };
 
-        let mut distances: [i16; 64] = [0; 64];
+        let mesh_data = self.get_container_mesh_data(&settings).await;
 
-        let fs = self.filesystem.lock().await;
-        
-        // TODO: Programmmieren
+        // ⚠️ Hier weiter
 
-
-
-
-
-
-        for i in 0..64 {
-            distances[i] = lidar_reading.zones[i].distance_mm;
-        }
-
-        debug!("handle_get_fillstate > Parsing the lidar reading to json...");
         let json = nojson::json(|f| {
             f.object(|f| {
-                f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
-                f.member(
-                    "last_read_timestamp_ms",
-                    lidar_reading.last_read_timestamp.to_string(),
-                )?;
-                f.member("distance_mm", distances)
+                f.member("index_count", 1)
             })
         });
-        trace!("handle_get_fillstate > Parsing to json done.");
+        // let json = nojson::json(|f| {
+        //     f.object(|f| {
+        //         f.member("index_count", mesh.index_count)?;
+        //         f.member("vertex_count", mesh.vertex_count)?;
+
+        //         f.member("positions", mesh.positions)?;
+        //         f.member("uvs", mesh.uvs)?;
+        //         f.member("indices", mesh.indices)
+        //         // f.member("positions", |f| {
+        //         //     f.array(|f| {
+        //         //         for vertex in mesh.positions {
+        //         //             f.array(|f| {
+        //         //                 f.element(vertex)?;
+        //         //             });
+        //         //         }
+        //         //         Ok(())
+        //         //     })
+        //         // });
+        //         // f.member("uvs", |f| {
+        //         //     f.array(|f| {
+        //         //         for uv in mesh.uvs {
+        //         //             f.array(|f| {
+        //         //                 f.element(uv)?;
+        //         //             });
+        //         //         }
+        //         //         Ok(())
+        //         //     })
+        //         // });
+        //         // f.member("indices", |f| {
+        //         //     f.array(|f| {
+        //         //         for indici in mesh.indices {
+        //         //             f.element(indici)?;
+        //         //         }
+        //         //         Ok(())
+        //         //     })
+        //         // })
+        //     })
+        // });
+        info!("LidarMesh > json: {}", json);
+        info!("LidarMesh > json: a");
+
+
+
+
+
+
+
+
+
+
+
+
+
+        // for i in 0..64 {
+        //     distances[i] = lidar_reading.zones[i].distance_mm;
+        // }
+
+        // debug!("handle_get_fillstate > Parsing the lidar reading to json...");
+        // let json = nojson::json(|f| {
+        //     f.object(|f| {
+        //         f.member("silicon_temp_degc", lidar_reading.silicon_temp_degc)?;
+        //         f.member(
+        //             "last_read_timestamp_ms",
+        //             lidar_reading.last_read_timestamp.to_string(),
+        //         )?;
+        //         f.member("distance_mm", distances)
+        //     })
+        // });
+        // trace!("handle_get_fillstate > Parsing to json done.");
 
         debug!("handle_get_fillstate > Initialising the response...");
         match conn.initiate_response(
@@ -675,6 +783,143 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
         trace!("handle_get_fillstate > Text was written. Request completed.");
 
         return Ok(());
+    }
+    // endregion
+
+    async fn get_container_mesh_data(&self, settings: &Settings) -> Result<u32, CalculateMeshDataError>
+    {
+        debug!("handle_get_fillstate > Waiting for a lock on the file system...");
+        let fs = self.filesystem.lock().await;
+        trace!("handle_get_fillstate > Filesystem lock was aquired.");
+
+        debug!("handle_get_fillstate > Trying to open the file \"{}\" ...", GLB_FILE_PATH);
+        let file = match fs.open(GLB_FILE_PATH, OpenFlags::READ) {
+            Ok(file) => file,
+            Err(error) => return Err(CalculateMeshDataError::IoError { error: error })
+        };
+        trace!("handle_get_fillstate > File was successfully opend.");
+
+        let mut file: StdFileReader<'_, LittleFsStorage<'static>> = StdFileReader { file: file };
+
+        let glb_data = match parse_file_data(
+            &mut file, 
+            settings.main_mesh_name.clone(), 
+            settings.lidar_camera_name.clone()
+        ) {
+            Ok(value) => value,
+            Err(error) => return Err(CalculateMeshDataError::GlbParseError { error })
+        };
+
+        let distances = {
+            debug!("handle_get_fillstate > Getting the latest lidar reading...");
+            let mut receiver = match self.reading_watch.receiver() {
+                Some(value) => value,
+                None => return Err(CalculateMeshDataError::ReaderMutexFull)
+            };
+            let lidar_reading = receiver.get().await;
+            trace!("handle_get_fillstate > Lidar reading was received.");
+
+            let mut distances: [i16; 64] = [0; 64];
+
+            for i in 0..63
+            {
+                distances[i] = lidar_reading.zones[i].distance_mm;
+            }
+
+            distances
+        };
+
+        let horizontal_fov_radians = match glb_data.lidar_camera.fov_radian {
+            Some(value) => value,
+            None => {
+                warn!("handle_get_fillstate: The loaded glb lidar camera didn't have a field of view. Defaulting to 1...");
+
+                1.0
+            }
+        };
+        let vertical_fov_radians = match glb_data.lidar_camera.aspect_ratio {
+            Some(value) => horizontal_fov_radians * value,
+            None => 1.0
+        };
+
+        let mesh = create_lidar_mesh(
+            &distances,
+            vertical_fov_radians, // Vertical FOV
+            horizontal_fov_radians, // Horizontal FOV
+            10.0, // Border width
+            5.0,  // Extrusion depth
+        );
+
+        let vertecies = get_vec3_f32_from_reader(
+            &mut file,
+            glb_data.container_mesh.vertecies.byte_offset,
+            glb_data.container_mesh.vertecies.byte_length
+        );
+
+        let indicies_data = match glb_data.container_mesh.indicies {
+            Some(value) => value,
+            None => return Err(CalculateMeshDataError::ContainerMissingIndecies) // TODO: Besser machen
+        };
+
+        let indicies = get_scalar_u16_from_reader(
+            &mut file, 
+            indicies_data.byte_offset, 
+            indicies_data.byte_length
+        );
+
+        let normals_data = match glb_data.container_mesh.normals {
+            Some(value) => value,
+            None => return Err(CalculateMeshDataError::ContainerMissingNormals) // TODO: Besser machen
+        };
+
+        let normals = get_vec3_f32_from_reader(
+            &mut file,
+            normals_data.byte_offset,
+            normals_data.byte_length
+        );
+
+        return Ok(1);
+    }
+
+    // region: load_settings_from_flash
+    /// Loads the Settings form the flash storage
+    /// 
+    /// ## Returns
+    /// Returns the flash settings from the flash storage
+    pub async fn load_settings_from_flash(&self) -> Result<Settings, SettingsError> {
+        debug!("load_settings_from_flash > Waiting for a lock on the file system...");
+        let fs = self.filesystem.lock().await;
+        trace!("load_settings_from_flash > Filesystem lock was aquired.");
+
+        debug!("load_settings_from_flash > Trying to open the file \"{}\" ...", SETTINGS_JSON_FILE_PATH);
+        let file = match fs.open(SETTINGS_JSON_FILE_PATH, OpenFlags::READ) {
+            Ok(file) => file,
+            Err(error) => return Err(SettingsError::IoError { error: error })
+        };
+        trace!("load_settings_from_flash > File was successfully opend.");
+
+        let file_size = file.size() as usize;
+
+        let mut json_bytes = vec![0; file_size];
+        let bytes_read = file
+            .read(&mut json_bytes)
+            .map_err(|error| SettingsError::IoError { error: error })?;
+
+        if bytes_read != file_size as u32
+        {
+            return Err(SettingsError::InvalidJsonError);
+        }
+
+        let json_text = core::str::from_utf8(&json_bytes)
+            .map_err(|_| SettingsError::InvalidJsonError)?;
+        let raw_json = RawJson::parse(json_text)
+            .map_err(|_| SettingsError::InvalidJsonError)?;
+        let json = Settings::try_from(raw_json.value())
+            .map_err(|_| SettingsError::InvalidJsonError)?;
+
+        trace!("load_settings_from_flash > The settings were parsed.");
+
+        return Ok(json);
     }
     // endregion
 
@@ -922,13 +1167,12 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
         });
         trace!("save_settings_from_connection > Parsing to json done.");
 
-        let path = "settings.json";
         debug!("save_settings_from_connection > Waiting for a lock on the file system...");
         let fs = self.filesystem.lock().await;
         trace!("save_settings_from_connection > Filesystem lock was aquired.");
 
-        debug!("save_settings_from_connection > Trying to open the file \"{}\" ...", path);
-        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNC) {
+        debug!("save_settings_from_connection > Trying to open the file \"{}\" ...", SETTINGS_JSON_FILE_PATH);
+        let file: littlefs_rust::File<'_, LittleFsStorage<'static>> = match fs.open(SETTINGS_JSON_FILE_PATH, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNC) {
             Ok(file) => file,
             Err(error) => {
                 return Err(SaveSettingsError::OpenFileError { error })
@@ -936,7 +1180,7 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
         };
         trace!("save_settings_from_connection > File was successfully opend.");
 
-        debug!("save_settings_from_connection > Writing the json to the file \"{}\" ...", path);
+        debug!("save_settings_from_connection > Writing the json to the file \"{}\" ...", SETTINGS_JSON_FILE_PATH);
         match file.write(json.to_string().as_bytes()) {
             Ok(_) => {},
             Err(error) => {
@@ -1036,14 +1280,14 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
                 if value.as_str() == etag.as_str()
                 {
                     debug!("serve_static_content > \"If-None-Match\"-Header matched. Returing 304 Not Modified...");
-                    match conn.initiate_response(
+                    return match conn.initiate_response(
                         304,
                         Some("Not Modified"),
                         &[
                             ("Access-Control-Allow-Origin", "*")
                         ],
                     ).await {
-                        Ok(()) => {},
+                        Ok(()) => Ok(()),
                         Err(error) => {
                             error!("serve_static_content > Error while initializing the response: {}", error);
                             return Err(error);
@@ -1389,6 +1633,53 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
     }
     // endregion
 
+    // region: setup_424_code_failed_dependency
+    /// Setts the http code 424 on the connection and the description for the body
+    /// 
+    /// ## Parameters 
+    /// - conn: The connection to write the code to
+    /// - description: The Description that should be written to the body
+    async fn setup_424_code_failed_dependency<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+        description: &str
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        debug!("setup_424_code_failed_dependency > Was called...");
+
+        debug!("setup_424_code_failed_dependency > A dependency failed. Initialising 400...");
+        match conn.initiate_response(
+            424,
+            Some("Failed Dependency"),
+            &[
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
+        ).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("setup_424_code_failed_dependency > Error while initializing the response: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("setup_424_code_failed_dependency > Response was initialized.");
+
+        debug!("setup_424_code_failed_dependency > Writing the json to the response...");
+        match conn.write_all(description.as_bytes()).await {
+            Ok(()) => {},
+            Err(error) => {
+                error!("setup_424_code_failed_dependency > Error while writing the response body: {}", error);
+                return Err(error);
+            }
+        };
+        trace!("setup_424_code_failed_dependency > Text was written. Request completed.");
+
+        return Ok(());
+    }
+    // endregion
+
     // region: setup_474_element_not_found
     /// Setts the http code 474 on the connection
     /// 
@@ -1423,7 +1714,7 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
     }
     // endregion
 
-    // region: setup_500_request_timeout
+    // region: setup_504_request_timeout
     /// Setts the http code 500 on the connection and log that
     /// a timeout happend
     /// 
@@ -1452,6 +1743,37 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
         ).await?;
         conn.write_all(b"Request timed out\n").await?;
         trace!("setup_500_request_timeout > Timeout response was sent.");
+
+        return Ok(());
+    }
+    // endregion
+
+    // region: setup_500_general
+    /// Setts the http code 500 on the connection
+    /// 
+    /// ## Parameters 
+    /// - conn: The connection to write the code to
+    async fn setup_500_general<T, const N: usize>(
+        &self,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), edge_http::io::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        debug!("setup_500_general > Was called...");
+
+        warn!("setup_500_general > Request unknown error. Returning HTTP 500...");
+        conn.initiate_response(
+            500,
+            Some("Internal Server Error"),
+            &[
+                ("Content-Type", "text/plain; charset=utf-8"),
+                ("Content-Length", "18"),
+                ("Access-Control-Allow-Origin", "*")
+            ],
+        ).await?;
+        conn.write_all(b"Internal Server Error\n").await?;
+        trace!("setup_500_general > Response was sent.");
 
         return Ok(());
     }
@@ -1525,6 +1847,7 @@ impl<const ACTIVITY_COUNT: usize> Handler for HttpHandler<ACTIVITY_COUNT> {
                     (Method::Get, "/api/model3d") => self.handle_get_model3d(conn).await,
                     (Method::Put, "/api/model3d") => self.handle_put_model3d(conn).await,
                     (Method::Put, "/api/led-brightness") => self.handle_put_led_brightness(conn).await,
+                    (Method::Get, "/api/fill-state") => self.handle_get_fillstate(conn).await,
                     (Method::Get, "/swagger") => self.serve_static_content(
                         conn,
                         "text/html; charset=utf-8",
@@ -1622,11 +1945,19 @@ struct FileSystemStat {
 }
 
 /// The settings from the application
-struct Settings {
+pub struct Settings {
     main_mesh_name: String,
     lidar_camera_name: String,
     wifi_ssid: String,
     wifi_password: String,
+}
+
+impl<'text, 'raw> TryFrom<RawJsonValue<'text, 'raw>> for Settings {
+    type Error = nojson::JsonParseError;
+
+    fn try_from(value: RawJsonValue<'text, 'raw>) -> Result<Self, Self::Error> {
+        return parse_settings_from_json(value);
+    }
 }
 
 /// Parses the settings from json
@@ -1708,6 +2039,17 @@ enum JsonParseError {
     ReaderReadFailed,
     Utf8ConvertError { error: core::str::Utf8Error },
     JsonParseError { error: nojson::JsonParseError }
+}
+
+impl core::fmt::Display for JsonParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Utf8ConvertError { error: _ } => write!(f, "Utf8ConvertError"),
+            Self::BodyTooLong => write!(f, "BodyTooLong"),
+            Self::ReaderReadFailed => write!(f, "ReaderReadFailed"),
+            Self::JsonParseError { error: _ } => write!(f, "JsonParseError")
+        }
+    }
 }
 
 #[derive(Debug)]

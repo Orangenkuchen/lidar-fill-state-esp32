@@ -6,3 +6,4 @@ pub mod file_manager;
 pub mod html_form;
 pub mod clock;
 pub mod led_state_manager;
+pub mod mesh;
