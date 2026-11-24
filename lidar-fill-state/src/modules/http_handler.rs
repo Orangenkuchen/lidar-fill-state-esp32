@@ -25,8 +25,11 @@ use gzip_bytes::gzip_bytes;
 use nojson::{RawJson, RawJsonValue};
 
 use crate::modules::{
-    file_manager::FileManager, glb_reader::{GlbParseError, GlbReader, get_scalar_u16_from_reader, get_vec3_f32_from_reader, parse_file_data}, html_form::Form, led_state_manager::LedStateManager, little_fs_storage::LittleFsStorage, mesh::create_lidar_mesh, vl53l8cx_lidar_service::LidarReadingWatch
+    file_manager::FileManager, glb_reader::{GlbParseError, GlbReader, get_scalar_u16_from_reader, get_vec3_f32_from_reader, parse_file_data}, html_form::Form, led_state_manager::LedStateManager, little_fs_storage::LittleFsStorage, mesh::{LidarMesh, create_lidar_mesh}, vl53l8cx_lidar_service::LidarReadingWatch
 };
+use boolmesh::prelude::*;
+use boolmesh::{Real, Vec3};
+use alloc::{vec::Vec};
 
 pub enum WriteFileFromRequestError<E> {
     Fs(Error),
@@ -673,13 +676,45 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
             }
         };
 
-        let mesh_data = self.get_container_mesh_data(&settings).await;
+        let mesh_data = match self.get_container_mesh_data(&settings).await {
+            Ok(value) => value,
+            Err(error) => match error {
+                CalculateMeshDataError::IoError { error } => {
+                    match error {
+                        Error::NoEntry => return self.setup_424_code_failed_dependency(
+                            conn, 
+                            "{\"settings-file.exists\":\"The settings-file wasn't found. Is it not setup yet?\"}"
+                        ).await,
+                        _ => {                            
+                            error!("handle_get_fillstate > Error while loading the mesh data from the 3dmodel: IoError {}", error);
+                            return self.setup_500_general(conn).await;
+                        }
+                    }
+                },
+                CalculateMeshDataError::ReaderMutexFull => {
+                    error!("handle_get_fillstate > Error while loading the mesh data from the 3dmodel: ReaderMutexFull");
+                    return self.setup_500_general(conn).await;
+                },
+                CalculateMeshDataError::GlbParseError { error } => {
+                    error!("handle_get_fillstate > Error while loading the mesh data from the 3dmodel: GlbParseError {}", error);
+                    return self.setup_500_general(conn).await;
+                },
+                CalculateMeshDataError::ContainerMissingIndecies => {
+                    error!("handle_get_fillstate > Error while loading the mesh data from the 3dmodel: ContainerMissingIndecies");
+                    return self.setup_500_general(conn).await;
+                },
+                CalculateMeshDataError::ContainerMissingNormals => {
+                    error!("handle_get_fillstate > Error while loading the mesh data from the 3dmodel: ContainerMissingNormals");
+                    return self.setup_500_general(conn).await;
+                }
+            }
+        };
 
         // ⚠️ Hier weiter
 
         let json = nojson::json(|f| {
             f.object(|f| {
-                f.member("index_count", 1)
+                f.member("index_count", mesh_data)
             })
         });
         // let json = nojson::json(|f| {
@@ -842,7 +877,7 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
             None => 1.0
         };
 
-        let mesh = create_lidar_mesh(
+        let lidar_mesh = create_lidar_mesh(
             &distances,
             vertical_fov_radians, // Vertical FOV
             horizontal_fov_radians, // Horizontal FOV
@@ -854,7 +889,7 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
             &mut file,
             glb_data.container_mesh.vertecies.byte_offset,
             glb_data.container_mesh.vertecies.byte_length
-        );
+        ).unwrap();
 
         let indicies_data = match glb_data.container_mesh.indicies {
             Some(value) => value,
@@ -865,7 +900,7 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
             &mut file, 
             indicies_data.byte_offset, 
             indicies_data.byte_length
-        );
+        ).unwrap();
 
         let normals_data = match glb_data.container_mesh.normals {
             Some(value) => value,
@@ -878,7 +913,72 @@ impl<const ACTIVITY_COUNT: usize> HttpHandler<ACTIVITY_COUNT> {
             normals_data.byte_length
         );
 
-        return Ok(1);
+        let container_positions: alloc::vec::Vec<f64> = vertecies
+            .iter()
+            .flatten()
+            .map(|&p| p as f64)
+            .collect();
+
+        let container_indices: alloc::vec::Vec<usize> = indicies
+            .iter()
+            .map(|&i| i as usize)
+            .collect();
+
+        let container = Manifold::new(
+            &container_positions,
+            &container_indices,
+        ).unwrap();
+
+        let lidar_positions: alloc::vec::Vec<f64> = lidar_mesh.positions
+            [..lidar_mesh.vertex_count]
+            .iter()
+            .flat_map(|v| [
+                v[0] as f64,
+                v[1] as f64,
+                v[2] as f64,
+            ])
+            .collect();
+
+        let lidar_indices: alloc::vec::Vec<usize> = lidar_mesh.indices
+            [..lidar_mesh.index_count]
+            .iter()
+            .map(|&i| i as usize)
+            .collect();
+
+        let lidar = Manifold::new(
+            &lidar_positions,
+            &lidar_indices,
+        ).unwrap();
+
+        let lidar_mesh = create_lidar_mesh(
+            &distances,
+            vertical_fov_radians,
+            horizontal_fov_radians,
+            10.0,
+            5.0,
+        );
+
+        let lidar_manifold = create_lidar_manifold(&lidar_mesh)
+            .unwrap();
+
+        let container_manifold = create_container_manifold(
+            &vertecies,
+            &indicies,
+        )
+        .unwrap();
+
+        let intersection = boolmesh::compute_boolean(
+            &container_manifold,
+            &lidar_manifold,
+            OpType::Intersect,
+        )
+        .unwrap();
+
+        let volume_m3 = calculate_mesh_volume(&intersection);
+
+        let volume_liters = volume_m3 * 1000.0;
+
+        return Ok(volume_liters as u32);
     }
 
     // region: load_settings_from_flash
@@ -2209,4 +2309,97 @@ where
     JsonParseError { error: JsonParseError },
     OpenFileError { error: littlefs_rust::Error },
     WriteFileError { error: littlefs_rust::Error }
+}
+
+fn calculate_volume(mesh: &Manifold) -> f32 {
+    if mesh.ps.is_empty() || mesh.hs.is_empty() {
+        return 0.0;
+    }
+
+    // Use the first vertex as reference to improve numerical stability.
+    let origin = mesh.ps[0];
+
+    let mut volume = 0.0f32;
+
+    for face in mesh.hs.chunks_exact(3) {
+        let a = mesh.ps[face[0].tail] - origin;
+        let b = mesh.ps[face[1].tail] - origin;
+        let c = mesh.ps[face[2].tail] - origin;
+
+        volume += a.dot(b.cross(c)) / 6.0;
+    }
+
+    volume.abs()
+}
+
+fn create_lidar_manifold(
+    mesh: &LidarMesh,
+) -> Result<Manifold, alloc::string::String> {
+    let mut positions = Vec::with_capacity(mesh.vertex_count * 3);
+
+    for p in &mesh.positions[..mesh.vertex_count] {
+        positions.push(p[0] as f64);
+        positions.push(p[1] as f64);
+        positions.push(p[2] as f64);
+    }
+
+    let indices: Vec<usize> = mesh.indices[..mesh.index_count]
+        .iter()
+        .map(|&i| i as usize)
+        .collect();
+
+    Manifold::new(&positions, &indices)
+}
+
+fn create_container_manifold(
+    vertices: &[[f32; 3]],
+    indices: &[u16],
+) -> Result<Manifold, alloc::string::String> {
+    let positions: Vec<f64> = vertices
+        .iter()
+        .flat_map(|v| [
+            v[0] as f64,
+            v[1] as f64,
+            v[2] as f64,
+        ])
+        .collect();
+
+    let indices: Vec<usize> = indices
+        .iter()
+        .map(|&i| i as usize)
+        .collect();
+
+    Manifold::new(&positions, &indices)
+}
+
+fn calculate_mesh_volume(mesh: &Manifold) -> f32 {
+    if mesh.ps.is_empty() || mesh.hs.is_empty() {
+        return 0.0;
+    }
+
+    let origin = mesh.ps[0];
+    let mut volume = 0.0f32;
+
+    for face in mesh.hs.chunks_exact(3) {
+        let a = mesh.ps[face[0].tail] - origin;
+        let b = mesh.ps[face[1].tail] - origin;
+        let c = mesh.ps[face[2].tail] - origin;
+
+        volume += a.dot(b.cross(c)) / 6.0;
+    }
+
+    volume.abs()
+}
+
+fn calculate_intersection_volume(
+    container: &Manifold,
+    lidar: &Manifold,
+) -> Result<f32, alloc::string::String> {
+    let intersection = boolmesh::compute_boolean(
+        container,
+        lidar,
+        OpType::Intersect,
+    )?;
+
+    Ok(calculate_mesh_volume(&intersection))
 }

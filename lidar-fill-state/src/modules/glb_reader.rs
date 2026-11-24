@@ -1,7 +1,5 @@
 use core::{
-    convert::{TryFrom, TryInto},
-    option::Option,
-    result::{Result, Result::Err, Result::Ok},
+    convert::{TryFrom, TryInto}, fmt::Display, option::Option, result::Result::{self, Err, Ok},
 };
 
 use alloc::{
@@ -52,6 +50,22 @@ pub enum GlbParseError {
     ContainerMeshNotFound,
     /// The camera that represents the lidar was not found
     LidarCameraNotFound
+}
+
+impl Display for GlbParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        return match self {
+            GlbParseError::ContainerMeshNotFound => write!(f, "ContainerMeshNotFound"),
+            GlbParseError::FileIsNotGlb => write!(f, "FileIsNotGlb"),
+            GlbParseError::FileReadFailed => write!(f, "FileReadFailed"),
+            GlbParseError::FileTooShort => write!(f, "FileTooShort"),
+            GlbParseError::InvalidJson => write!(f, "InvalidJson"),
+            GlbParseError::JsonDataNotFound => write!(f, "JsonDataNotFound"),
+            GlbParseError::LidarCameraNotFound => write!(f, "LidarCameraNotFound"),
+            GlbParseError::UnknownVersion { found_version } => write!(f, "UnknownVersion (v{})", found_version),
+            GlbParseError::UnknownChunkType { chunk_type } => write!(f, "UnknownChunkType ({})", chunk_type)
+        }
+    }
 }
 
 #[derive(Debug)]
